@@ -57,3 +57,6 @@ agent/venv/
 # Placeholder env files are safe to commit
 !.env.example
 !agent/.env.example
+
+# Real compose file contains secrets. Commit docker-compose.example.yml instead.
+docker-compose.yml

@@ -1,0 +1,130 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: callcenter-dashboard-app
+    working_dir: /app
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: your_db_name
+      DB_USER: your_db_user
+      DB_PASSWORD: your_db_password
+      DATABASE_URL: postgresql://your_db_user:your_db_password@db:5432/your_db_name?schema=public
+      # Internal container-to-container communication:
+      LIVEKIT_URL: wss://your-project.livekit.cloud
+      # Browser-to-server communication:
+      NEXT_PUBLIC_LIVEKIT_URL: wss://your-project.livekit.cloud
+      LIVEKIT_API_KEY: your_livekit_api_key
+      LIVEKIT_API_SECRET: your_livekit_api_secret
+      QDRANT_HOST: qdrant
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      db:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+    command: sh -c "npx prisma generate && npx prisma db push && npm run dev"
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: callcenter-dashboard-agent
+    working_dir: /app
+    env_file:
+      - ./agent/.env
+    environment:
+      LIVEKIT_URL: wss://your-project.livekit.cloud
+      LIVEKIT_API_KEY: your_livekit_api_key
+      LIVEKIT_API_SECRET: your_livekit_api_secret
+      GOOGLE_API_KEY: your_google_api_key
+      DEEPGRAM_API_KEY: your_deepgram_api_key
+      QDRANT_HOST: qdrant
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      - livekit
+      - app
+      - qdrant
+      - redis
+    volumes:
+      - ./agent:/app
+    command: python agent.py dev
+    restart: unless-stopped
+
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: callcenter-dashboard-livekit
+    restart: unless-stopped
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882"
+      - "7882:7882/udp"
+    environment:
+      LIVEKIT_KEYS: "devkey: your_livekit_dev_secret"
+      LIVEKIT_PORT: 7880
+      LIVEKIT_HTTP_REST_PORT: 7881
+      LIVEKIT_RTC_UDP_PORT: 7882
+      LIVEKIT_RTC_TCP_PORT: 7882
+    command: --dev --node-ip 127.0.0.1
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: callcenter-dashboard-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  db:
+    image: postgres:16-alpine
+    container_name: callcenter-dashboard-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: your_db_user
+      POSTGRES_PASSWORD: your_db_password
+      POSTGRES_DB: your_db_name
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U your_db_user -d your_db_name"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: callcenter-dashboard-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:
+  qdrant_data:
+  redis_data:
