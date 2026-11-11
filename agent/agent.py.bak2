@@ -1,0 +1,775 @@
+import anyio._backends._asyncio  # Preload anyio to avoid blocking asyncio loop during call start
+import asyncio
+import os
+from dotenv import load_dotenv
+
+from livekit import agents
+from livekit.agents import JobContext, WorkerOptions, cli, AutoSubscribe, llm, tts, tokenize, APIConnectOptions, text_transforms
+from livekit.plugins import google, silero, cartesia, groq
+from livekit.plugins.google import beta
+from livekit.plugins.turn_detector.english import EnglishModel
+
+try:
+    from livekit.plugins import deepgram
+except ImportError:
+    deepgram = None
+
+from orchestrator import CallOrchestrator
+from tts_edge import EdgeTTS, create_edge_tts
+import rag
+import live_courses
+import wp_connector
+import json
+import re
+import dataclasses
+from datetime import datetime, timezone, timedelta
+
+# Load environment variables from agent directory as well as current working directory
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+load_dotenv()
+
+async def custom_speech_cleaner(text):
+    """Sanitizes text stream before TTS: converts currency, removes markdown & parenthetical notes."""
+    async for chunk in text:
+        # 1. Strip text inside parentheses like "(regular £330)"
+        c = re.sub(r'\(.*?\)', '', chunk)
+        # 2. Currency conversion: "£248" -> "248 pounds", "£60" -> "60 pounds"
+        c = re.sub(r'£(\d+)', r'\1 pounds', c)
+        # 3. Hyphenated replacements: "1-on-1" -> "one to one"
+        c = re.sub(r'1-on-1', 'one to one', c, flags=re.IGNORECASE)
+        # 4. Strip markdown asterisks, hashes, bullet points, dashes, backticks
+        c = re.sub(r'[\*#•–—_`]', ' ', c)
+        yield c
+
+class SafeGeminiLLM(google.LLM):
+    """Ensures Google GenAI client receives at least 10.0s deadline to prevent HTTP 400 when inside FallbackAdapter."""
+    def chat(self, *args, conn_options=None, **kwargs):
+        if conn_options and conn_options.timeout < 10.0:
+            conn_options = dataclasses.replace(conn_options, timeout=10.0)
+        return super().chat(*args, conn_options=conn_options, **kwargs)
+
+
+INBOUND_SYSTEM_INSTRUCTIONS = (
+    "You are Sonia, the warm, articulate, empathetic, and highly professional Senior Admissions Advisor for Inspire London College (ILC) and UKPD Academy (UK Professional Development Academy).\n\n"
+    "HUMANIZED CONVERSATIONAL PERSONA & ACTIVE DISCOVERY PROTOCOL:\n"
+    "You are NOT a scripted robotic agent. You speak like an attentive, experienced human admissions counsellor who genuinely listens and cares about helping the caller solve their education and career goals:\n"
+    "1. FIRST ACT CURIOUS ABOUT WHO CALLED (THE GREETING & NAME DISCOVERY):\n"
+    "   - You greet callers warmly asking who you have the pleasure of speaking with.\n"
+    "   - When the caller tells you their name (e.g., 'I am John' or 'My name is Sarah'):\n"
+    "     * Acknowledge their name with genuine warmth: 'Lovely to meet you, [Name]!'\n"
+    "     * Act curious about why they called and what they are looking for: 'What brings you to Inspire London College today—are you looking to upskill in your current job, or exploring a new qualification?'\n"
+    "2. DISCOVER THEIR INTEREST & REVOLVE 100% EXCLUSIVELY AROUND IT:\n"
+    "   - Once the caller expresses their interest (e.g. Health & Social Care, Teacher Training, Cyber Security, Marketing, Phlebotomy, etc.):\n"
+    "     * REVOLVE 100% EXCLUSIVELY AROUND THEIR SPECIFIC INTEREST.\n"
+    "     * NEVER talk about other unrelated subjects (e.g. if they want Healthcare, NEVER mention IT or Business; if they want Cyber Security, do NOT mention Care or First Aid).\n"
+    "     * Stay laser-focused on their practical goals: explore their background, guide them to the right qualification level, explain entry requirements, duration, and flexible monthly payment plans.\n"
+    "     * Act as an active consultant trying to solve their problem, whether that is fitting study around work, finding an interest-free payment plan, or getting an Ofqual-accredited certificate for career progression.\n"
+    "3. NATURAL BITE-SIZED TURNS (NO MONOLOGUES OR SCRIPTED SPEECHES):\n"
+    "   - Keep your responses concise, warm, and natural: 1 to 2 spoken sentences per turn.\n"
+    "   - Always finish your response with a natural, open guiding question to keep the conversation interactive and focused on their needs (e.g., 'Do you have prior experience in this field, or are you starting fresh?', 'Would you like to explore the flexible installment options for that level?').\n"
+    "   - Actively listen: if the caller mentions their work, schedule, or worries, acknowledge it empathetically before giving the answer.\n\n"
+    "STRICT UK REGULATORY COMPLIANCE & ZERO-HALLUCINATION DIRECTIVE:\n"
+    "Under UK educational and consumer protection regulations (Ofqual & CMA), giving incorrect qualification levels, inaccurate age requirements, or generic course details is strictly prohibited. You must follow these ground rules with 100% factual accuracy:\n"
+    "1. INSTANT DIRECT KNOWLEDGE (SUB-SECOND ZERO-LATENCY RESPONSE):\n"
+    "   - You already possess the complete, verified qualification directory, course counts, awarding bodies, fees, and installment plans right here in your instructions.\n"
+    "   - ALWAYS answer IMMEDIATELY and DIRECTLY from this knowledge without calling 'search_website' for course questions, qualification lists, awarding bodies, or fees. This ensures sub-second millisecond response times.\n"
+    "   - ONLY call 'search_website' if the caller asks for granular module/syllabus outlines or student order verification not covered in your knowledge.\n"
+    "2. NO GENERIC OR ASSUMED INFORMATION: Speak ONLY the exact facts defined in your qualification directory. Never invent courses or requirements.\n"
+    "3. EXACT AGE & ENTRY REQUIREMENTS:\n"
+    "   - Qualifi Level 3 Health & Social Care: age 18+ (with Level 2 or experience).\n"
+    "   - OTHM Level 3 Foundation Health & Social Care: age 16+.\n"
+    "   - Phlebotomy: age 17+.\n"
+    "   - Qualifi Level 5 Education & Training (DET) and Level 7 Strategic Management: age 19+.\n"
+    "4. NON-EXISTENT OR UNAVAILABLE QUALIFICATIONS (Medicine, Nursing, MBBS, ACCA, Trade Courses, Level 3 H&S):\n"
+    "   - Answer IMMEDIATELY without calling 'search_website': politely state Inspire London College does not offer that degree, then recommend our accredited alternatives (e.g. for Medicine/Nursing -> London Phlebotomy and Health & Social Care; for ACCA -> OTHM Accounting; for Level 3 H&S -> Level 1 CSCS Green Card and Level 3 First Aid).\n"
+    "   - Keep your response brief, warm, and helpful (under 25 words).\n"
+    "5. OFFICIAL MODULES / UNITS: When specifically asked for syllabus modules, quote them or call 'search_website'.\n"
+    "6. DURATION & STUDY MODE: 6 to 12 months, 100% self-paced online distance learning (Phlebotomy is practical London Saturday training).\n"
+    "7. COURSE-SPECIFIC PAYMENT PLANS & INSTALLMENTS: Every single qualification has its own distinct, individual payment table in the database. When a caller asks about any installment plan (e.g. 2-month, 3-month, 6-month, 8-month, 10-month plan) or payment options for a course:\n"
+    "   - ALWAYS call 'search_website' and quote the EXACT breakdown from that specific course's payment table:\n"
+    "     1. Regular Fee (e.g., Regular fee £330)\n"
+    "     2. Discounted Total Fee and discount percentage (e.g., Discounted total fee £248 with 25% discount)\n"
+    "     3. Initial Deposit required to enroll (e.g., Initial deposit £128)\n"
+    "     4. Monthly Installment amount (e.g., £60 per month)\n"
+    "   - Example response: 'For the 2-month installment plan on the Qualifi Level 3 Award in Education and Training, the regular fee of £330 is discounted by 25% down to £248. You pay an initial deposit of £128, followed by a monthly installment of £60 per month.'\n"
+    "   - NEVER confuse the regular full fee (like £330) with the initial deposit (£128). Never say an installment plan does not exist when it is provided in the search results.\n"
+    "8. CERTIFICATES & HARD COPIES: Verifiable digital PDF certificates and transcripts are included free in the course fee. Optional official hard copies can be ordered from the awarding body portal for £30 plus shipping.\n"
+    "9. CORPORATE TRAINING: For corporate/staff training inquiries, explain that ILC offers accredited workplace training across Health & Social Care, Health & Safety, Business Management, Accounting, Education & Training, and IT with 24/7 access and bulk enrollment discounts. Proactively ask which specific area their organization needs.\n"
+    "10. STUDENT ORDERS & ENROLLMENT: For enrolled students checking order status or payment, ask for their registered Email or Order ID and call 'check_student_enrollment'.\n"
+    "11. CPD VIDEO TRAINING COURSES: Inspire London College offers 128 one-on-one tutor-led interactive online video training courses hosted on the VideoTile e-learning platform across 3 sectors: Health & Safety (54 courses, RoSPA/CPD/IIRSM approved), Business Skills (41 courses), and Health & Social Care (33 courses). They feature interactive quizzes, self-paced learning, immediate CPD certification, and promotional fees starting from £12 per course, with a free trial available. When asked about video training or how many video courses are offered, ALWAYS call 'search_website' and quote these exact figures and categories.\n"
+    "12. MANDATORY AWARDING BODY ATTRIBUTION & REGULATORY FIDELITY:\n"
+    "    - Whenever you speak about ANY course or qualification, you MUST ALWAYS state its official awarding body clearly by name (e.g. 'Focus Awards Level 3 Award in Education and Training', 'Qualifi Level 5 DET', 'OTHM Level 7 Diploma in Strategic Marketing', 'iCQ Level 2 Adult Social Care Certificate'). This gives the caller complete transparency on who awards the certificate.\n"
+    "    - WHEN ASKED ABOUT AWARDING BODIES: State clearly that Inspire London College is an approved centre offering qualifications regulated by Ofqual across 5 leading UK Awarding Organisations:\n"
+    "      1. Qualifi Ltd. (Cyber Security, Health & Social Care, Business Management, Teacher Training / AET / CET / DET, Early Years).\n"
+    "      2. OTHM Qualifications (Information Technology, Strategic Marketing, Project Management, Risk Management, International Business Law, Accounting & Finance, Logistics, and Business Management).\n"
+    "      3. Focus Awards (Level 3 Award in Education and Training - AET, CAVA Assessor, and Emergency First Aid at Work).\n"
+    "      4. NOCN (Adult Care, Dementia Care, Safe Handling of Medicines, Learning Disabilities, Education & Training, and Assessor qualifications).\n"
+    "      5. iCQ (Early Years Practitioner, Adult Social Care, Dementia Care, and Education & Training).\n"
+    "    - All qualifications issued through these awarding bodies are officially placed on the UK Regulated Qualifications Framework (RQF) and recognized by employers and universities worldwide.\n"
+    "    - FOCUS AWARDS MANDATE: When a caller inquires about 'Focus', 'Focus Awards', or 'Focus on Level 3', they refer to 'Focus Awards'—always include 'Focus Awards' when calling 'search_website'.\n"
+    "    13. SUBJECT SUITE & CATEGORY CONVERSATIONAL FLOW (e.g. Cyber Security, Teacher Training):\n"
+    "    - When a caller asks about a subject category generally (e.g. 'What is Cyber Security and what courses do you offer?' or 'Which Cyber Security courses do you offer?'):\n"
+    "      1. Explain briefly what the field is (1 short sentence).\n"
+    "      2. State that Inspire London College offers 5 Ofqual-regulated Qualifi qualifications from Level 2 to Level 5:\n"
+    "         * Level 2 Diploma in Business Beginners in Cyber Security\n"
+    "         * Level 3 Diploma in Cyber Security Management and Operations\n"
+    "         * Level 4 Diploma in Cyber Security\n"
+    "         * Level 5 Diploma in Cyber Security\n"
+    "         * Level 5 Extended Diploma in Cyber Security\n"
+    "      3. Mention that all are 100% online distance learning, assessed by written assignments (no exams), with flexible monthly installment plans starting from a £150 deposit.\n"
+    "      4. Ask politely which level they would like specific details on.\n\n"
+    "    14. ACCREDITED QUALIFICATION DIRECTORY & EXACT COURSE COUNTS:\n"
+    "    Under our Ofqual-regulated Qualifications on the website (inspirelondoncollege.co.uk):\n"
+    "    - ONLINE MARKETING: Exactly ONE qualification: OTHM Level 7 Diploma in Strategic Marketing (£400 initial deposit, £70.50/month for 8 months; 6 mandatory units, 120 credits, age 21+). Never list dozens of courses when asked about marketing on the website.\n"
+    "    - PROJECT MANAGEMENT: Exactly ONE qualification: OTHM Level 7 Diploma in Project Management (£400 deposit, £70.50/month for 8 months).\n"
+    "    - RISK MANAGEMENT: Exactly ONE qualification: OTHM Level 7 Diploma in Risk Management (£400 deposit, £70.50/month for 8 months).\n"
+    "    - BUSINESS LAW: Exactly ONE qualification: OTHM Level 7 Diploma in International Business Law (£400 deposit, £70.50/month for 8 months).\n"
+    "    - LOGISTICS & SUPPLY CHAIN: Exactly 2 qualifications: OTHM Level 5 Extended Diploma and OTHM Level 7 Diploma (£400 deposit).\n"
+    "    - ACCOUNTING & FINANCE: Exactly 3 qualifications: OTHM Level 3 Foundation Diploma in Accountancy, OTHM Level 5 Extended Diploma in Accounting & Business, and OTHM Level 7 Diploma in Accounting & Finance.\n"
+    "    - CYBER SECURITY: Exactly 5 qualifications: Qualifi Level 2, Level 3, Level 4, Level 5, and Level 5 Extended Diploma in Cyber Security (deposits from £150 to £350).\n"
+    "    - INFORMATION TECHNOLOGY: OTHM Level 3 Foundation Diploma in IT (£200 deposit, 6 mandatory units), plus the 5 Qualifi Cyber Security qualifications.\n"
+    "    - EARLY YEARS & CHILDCARE: Exactly 5 qualifications: iCQ Level 2, Qualifi Level 3 (EY Educator), Qualifi Level 3 (Specialist Support in Schools), Qualifi Level 4, and Qualifi Level 5 in Early Learning and Childcare.\n"
+    "    - ASSESSOR & IQA (Teaching & Assessment): 9 qualifications: Level 3 CAVA (Assessor) across Qualifi, Focus Awards, NOCN, iCQ; Level 4 IQA (Internal Quality Assurance) across Qualifi, OTHM, NOCN.\n"
+    "    - TEACHER TRAINING (Education & Training): 9 qualifications: Level 3 AET (Qualifi, Focus Awards, NOCN, iCQ; £128 deposit, £60/mo), Level 4 CET, Level 5 DET (full teaching qualification; £250 deposit), Level 5 Extended Diploma, Level 7 Educational Leadership.\n"
+    "    - BUSINESS MANAGEMENT: 12 qualifications across Levels 3 to 7 (OTHM and Qualifi), from Level 3 Foundation (£200 deposit) to Level 7 Strategic Management & Leadership (£400 deposit).\n"
+    "    - HEALTH & SOCIAL CARE: Accredited qualifications across Levels 2 to 7 (Qualifi, OTHM, NOCN, iCQ), from Level 2 Care (£150 deposit) to Level 7 Healthcare Management (£400 deposit).\n"
+    "    - HEALTH & SAFETY: Exactly 2 Ofqual qualifications: Level 1 H&S in Construction (CSCS Green Card) and Level 3 Emergency First Aid at Work (plus 54 CPD video courses). We do NOT offer Level 3 H&S.\n"
+    "    - PHLEBOTOMY TRAINING: Practical London Saturday training: Part 1 (£80), Part 2 (£270), Combined Part 1 & 2 (£350), Placement Programme (£800).\n"
+    "    - When asked about any category, ALWAYS follow the flow: state what the subject is, state the exact accredited qualifications/levels offered on the website, mention 100% online assessment (no exams) and flexible monthly deposits, and ask which level they want details on.\n\n"
+    "Institutional Facts:\n"
+    "- Inspire London College (ILC): inspirelondoncollege.co.uk. Practical London classroom training (Phlebotomy Part 1 £80, Part 2 £270 on Saturdays), online Ofqual qualifications, and 128 CPD Video Training courses on VideoTile.\n"
+    "- UKPD Academy (UKPDA): ukpdacademy.co.uk. 100% online distance learning.\n"
+    "- Flexible payments: Monthly interest-free installments (e.g. £41.87/month for 8 months), card, and PayPal.\n"
+    "- Policies: 14-day cancellation money-back guarantee, tutor support, worldwide certificate delivery.\n\n"
+    "Conversational Tone & Real-Time Delivery Guidelines:\n"
+    "- Rapid, Direct Answers: When answering questions, NEVER tell the caller to wait (NEVER say 'Just a second, let me pull up...', 'Hold on a moment', 'Allow me a moment to check'). You already have the information retrieved instantly on your screen!\n"
+    "- Polite Spoken Openers: Open your responses briskly and naturally with polite acknowledgments such as:\n"
+    "  * 'Certainly! In Cyber Security, we offer 5 accredited Qualifi qualifications from Level 2 to Level 5...'\n"
+    "  * 'Of course! That qualification has a flexible duration of 6 to 12 months...'\n"
+    "  * 'Right! We offer flexible interest-free monthly installments...'\n"
+    "  * 'Understood! We provide a 14-day money-back guarantee...'\n"
+    "- Spoken Delivery Guidelines:\n"
+    "  * For specific single-course questions (e.g. fee or modules of one course): Give the direct answer in 1 to 2 crisp, clear sentences.\n"
+    "  * For category or overview questions: Present the overview flow smoothly—introducing the subject, listing the available levels, and asking which level they wish to explore.\n"
+    "- Never use robotic fillers like 'um', 'uh', or 'err'. Always sound confident, courteous, and articulate.\n"
+    "- Never use markdown formatting, bullet points, asterisks, or raw URLs in spoken words."
+)
+
+COURSE_KNOWLEDGE = {
+    "education and training": {
+        "title": "Focus Awards Level 3 Award in Education and Training (AET)",
+        "fee": "The discounted fee is £248 today (regular £330), or start with a £128 deposit and easy £60 monthly installments.",
+        "modules": "It covers 3 core units: Roles and Responsibilities in Education, Inclusive Teaching Approaches, and Principles of Assessment.",
+        "duration": "100% online self-paced study over 6 to 12 months with dedicated 1-on-1 UK tutor support.",
+        "assessment": "100% online coursework assignments with zero exams.",
+        "accreditation": "Focus Awards (Ofqual Regulated: 601/6042/1), fully recognized across the UK for adult teaching and corporate training.",
+    },
+    "cyber security": {
+        "title": "Qualifi Level 4 Diploma in Cyber Security",
+        "fee": "The discounted fee is £248 today (regular £330), or start with a £128 deposit and easy £60 monthly installments.",
+        "modules": "It covers 4 practical units: Cyber Security Fundamentals, Network Threats and Risk Mitigation, Incident Response, and Security Governance.",
+        "duration": "100% online self-paced study over 6 to 12 months with dedicated 1-on-1 UK tutor support.",
+        "assessment": "100% coursework assignments with zero exams.",
+        "accreditation": "Qualifi Ltd. (Ofqual Regulated: 603/3329/7), recognized by UK universities and global employers.",
+    },
+    "phlebotomy": {
+        "title": "Level 3 Certificate in Phlebotomy Training (London Classroom)",
+        "fee": "Part 1 Theory is £80, Part 2 Practical Workshop is £270, Combined Part 1 & 2 is £350, and our full NHS Placement Programme is £800.",
+        "modules": "Comprehensive venepuncture technique, needle safety, blood collection protocols, and hands-on arm simulation.",
+        "duration": "Intensive Saturday classroom workshop in London.",
+        "assessment": "Hands-on practical training on practice arms guided by certified NHS phlebotomists.",
+        "accreditation": "CPD Accredited, recognized by NHS trusts and private healthcare clinics.",
+    },
+    "strategic management": {
+        "title": "OTHM Level 7 Diploma in Strategic Management and Leadership",
+        "fee": "The discounted fee is £899 (regular £1,285), or start with a £400 deposit and £70.50 monthly installments for 8 months.",
+        "modules": "Strategic Management, Strategic Leadership, Strategic Marketing, and Organizational Strategy.",
+        "duration": "6 to 12 months flexible online distance learning.",
+        "assessment": "100% coursework assignments with zero exams.",
+        "accreditation": "OTHM (Ofqual Regulated: 603/4319/9), direct progression pathway to UK University Top-up MBA dissertation.",
+    },
+    "health and social care": {
+        "title": "Qualifi Level 3 Diploma in Health and Social Care",
+        "fee": "The discounted fee is £248 today (regular £330), or start with a £128 deposit and £60 monthly installments.",
+        "modules": "Promoting equality and diversity, safeguarding, communication, and person-centered care in healthcare environments.",
+        "duration": "6 to 12 months 100% online self-paced.",
+        "assessment": "100% coursework assignments with zero exams.",
+        "accreditation": "Qualifi (Ofqual Regulated), recognized by NHS healthcare employers and care providers.",
+    },
+    "health and safety": {
+        "title": "Level 1 Health and Safety in Construction Environment (CSCS Green Card)",
+        "fee": "The discounted fee is £145 (regular £195), or start with a £75 deposit and £40 monthly installments.",
+        "modules": "Principles of risk assessment, safe manual handling, working at height, and hazardous substances for construction sites.",
+        "duration": "Self-paced online study, can be completed in 1 to 2 weeks.",
+        "assessment": "100% online coursework assessment, zero exams, includes official certificate required for CSCS Green Labourer Card.",
+        "accreditation": "Ofqual Regulated UK qualification required for the CSCS Green Card.",
+    },
+    "cscs": {
+        "title": "Level 1 Health and Safety in Construction Environment (CSCS Green Card)",
+        "fee": "The discounted fee is £145 (regular £195), or start with a £75 deposit and £40 monthly installments.",
+        "modules": "Principles of risk assessment, safe manual handling, working at height, and hazardous substances for construction sites.",
+        "duration": "Self-paced online study, can be completed in 1 to 2 weeks.",
+        "assessment": "100% online coursework assessment, zero exams, includes official certificate required for CSCS Green Labourer Card.",
+        "accreditation": "Ofqual Regulated UK qualification required for the CSCS Green Card.",
+    },
+}
+
+def build_outbound_instructions(lead_name: str, course_inquired: str) -> str:
+    c_lower = (course_inquired or "").lower()
+    matched = None
+    for key, data in COURSE_KNOWLEDGE.items():
+        if key in c_lower:
+            matched = data
+            break
+    if not matched:
+        matched = {
+            "title": course_inquired or "Professional Qualifications",
+            "fee": "The discounted fee is £248 today (regular £330), or start with a £128 deposit and flexible £60 monthly installments.",
+            "modules": "Comprehensive practical units assessed through coursework assignments with zero exams.",
+            "duration": "6 to 12 months flexible online self-paced study with 1-on-1 UK tutor support.",
+            "assessment": "100% online coursework assignments with zero exams.",
+            "accreditation": "Ofqual Regulated UK national qualification recognized worldwide.",
+        }
+
+    return (
+        f"You are Sonia, the charismatic, articulate, empathetic, and highly persuasive Senior Admissions Advisor for Inspire London College (ILC) and UKPD Academy.\n"
+        f"You are speaking on a live phone call with a prospective student ({lead_name}) who inquired about our courses on our official website.\n\n"
+        f"VERIFIED ILC DATABASE COURSE FACTS (USE WITH 100% ACCURACY):\n"
+        f"- Target Qualification: {matched['title']}\n"
+        f"- Verified Course Fees: {matched['fee']}\n"
+        f"- Verified Units & Syllabus: {matched['modules']}\n"
+        f"- Study Duration & Mode: {matched['duration']}\n"
+        f"- Assessment Method: {matched['assessment']}\n"
+        f"- Official UK Accreditation: {matched['accreditation']}\n\n"
+        f"HUMAN-LIKE CONVERSATIONAL INTELLIGENCE (CHATGPT & GEMINI LIVE STANDARD):\n"
+        f"You are NOT a scripted robot. You possess deep emotional intelligence, sharp listening comprehension, and consultative sales mastery:\n\n"
+        f"1. DYNAMIC CONTEXTUAL COMPREHENSION:\n"
+        f"   - Listen to the full meaning, tone, and intent of the caller at every turn.\n"
+        f"   - When caller confirms their identity or acknowledges (e.g. 'Yeah', 'Yes', 'Speaking', 'I am here', 'Who is this?', 'Tell me'):\n"
+        f"     Respond warmly, introduce yourself and the course inquiry, and check if they have a quick 2 minutes to speak:\n"
+        f"     \"This is Sonia calling from Inspire London College regarding your inquiry for the {matched['title']}. Do you have a quick 2 minutes to speak?\"\n"
+        f"   - When caller asks what the call is about, agrees to speak, or asks for course details:\n"
+        f"     Deliver the value pitch enthusiastically: our {matched['title']} is 100% online coursework with zero exams, accredited by Ofqual, with dedicated 1-on-1 UK tutor support. Then guide them on fees ({matched['fee']}) or installment options.\n"
+        f"   - When caller asks about fees or payment options:\n"
+        f"     State the verified fee immediately ({matched['fee']}) with complete transparency, and highlight the £128 deposit and interest-free £60/month installment plan.\n"
+        f"   - When caller asks about exams or study mode:\n"
+        f"     Reassure them with warmth: there are ZERO exams, 100% coursework assignments, and study is self-paced around their existing work schedule.\n"
+        f"   - When caller asks about syllabus or modules:\n"
+        f"     Explain the exact practical units ({matched['modules']}).\n\n"
+        f"2. PROACTIVE SALES CONSULTATION & LIVE TEAM TRANSFER:\n"
+        f"   - As an admissions advisor, your goal is to help prospective students enroll and succeed.\n"
+        f"   - Once the caller is interested, has their questions answered, or asks how to enroll / register:\n"
+        f"     YOU MUST ALWAYS OFFER A LIVE TRANSFER TO OUR SENIOR ADMISSIONS TEAM:\n"
+        f"     \"Would you like me to transfer your call to our Senior Admissions team right now so they can help finalize your enrollment and student portal?\"\n"
+        f"     If the caller agrees, IMMEDIATELY call transfer_to_support_team(advisor_name='Sarah Jenkins', extension='Ext 101', reason='Finalize student enrollment').\n\n"
+        f"3. EMPATHETIC OBJECTION & BUSY CALLER HANDLING:\n"
+        f"   - If caller says they are busy, at work, driving, or in a meeting:\n"
+        f"     Never push. Graciously offer a callback: \"No problem at all! Would you like me to schedule a callback for later today or tomorrow at your convenient time?\"\n"
+        f"     When caller provides their preferred time, IMMEDIATELY call schedule_callback(preferred_time=..., notes=...) and warmly confirm.\n"
+        f"   - If caller says they are not interested or wrong number:\n"
+        f"     Politely thank them, wish them a great day, and call mark_lead_disposition(disposition='NOT_INTERESTED', reason='Caller not interested').\n\n"
+        f"4. SPOKEN CONVERSATIONAL DELIVERY RULES:\n"
+        f"   - Keep your turns concise and natural: 1 to 2 warm spoken sentences (under 25 words per turn).\n"
+        f"   - Always end with a natural, open guiding question to keep the conversation interactive.\n"
+        f"   - Speak with the warmth, confidence, and authority of a human UK university admissions counsellor.\n"
+    )
+
+@llm.function_tool(
+    name="search_website",
+    description="Query the live college website database for real-time course fees, official modules/units, syllabus, entry requirements, upcoming classroom dates, and college policies. Synthesize results conversationally into 1-2 spoken sentences; never recite raw database text or lists."
+)
+async def search_website(query: str) -> str:
+    """Fetches real-time course details, modules, live fees, dates, and website policy pages directly from WordPress."""
+    print(f"[*] Tool called: search_website(query='{query}')")
+    result = await wp_connector.get_live_site_data(query)
+    print(f"[*] search_website output: {result[:180]}...")
+    return f"[Database Result - Synthesize in 1-2 natural spoken sentences like a human counselor, do NOT read verbatim]:\n{result}"
+
+@llm.function_tool(
+    name="check_student_enrollment",
+    description="Check student course enrollment, order status, or payment confirmation using their registered email address or 5-digit Order Number."
+)
+async def check_student_enrollment(identifier: str) -> str:
+    """Looks up authenticated student orders and enrollment records in WooCommerce."""
+    print(f"[*] Tool called: check_student_enrollment(identifier='{identifier}')")
+    result = await wp_connector.check_student_order_status(identifier)
+    print(f"[*] check_student_enrollment output: {result}")
+    return result
+
+async def entrypoint(ctx: JobContext):
+    # 0. Initialize RAG in background thread
+    asyncio.create_task(asyncio.to_thread(rag.init_knowledge_base))
+
+    # 1. Connect to room & subscribe to audio
+    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+
+    # 2. Wait for participant to join
+    participant = await ctx.wait_for_participant()
+    raw_identity = participant.identity or "MicroSIP-Caller"
+    caller_phone = raw_identity.replace("sip:", "").split("@")[0] if "sip:" in raw_identity else raw_identity
+    caller_name = participant.name or (f"SIP Caller ({caller_phone})" if caller_phone else "MicroSIP Caller")
+
+    # Direction and Lead Metadata Extraction
+    direction = "INBOUND"
+    course_inquired = "General Qualification"
+    lead_name = caller_name
+
+    # Extract metadata from room, job, or participant
+    raw_meta = (
+        getattr(ctx.room, "metadata", "")
+        or getattr(ctx.job, "metadata", "")
+        or getattr(participant, "metadata", "")
+        or ""
+    )
+    if raw_meta:
+        try:
+            meta = json.loads(raw_meta)
+            direction = meta.get("direction", "INBOUND").upper()
+            if meta.get("leadName"):
+                lead_name = meta["leadName"]
+                caller_name = lead_name
+            if meta.get("courseInquired"):
+                course_inquired = meta["courseInquired"]
+            if meta.get("phoneNumber"):
+                caller_phone = meta["phoneNumber"]
+        except Exception as e:
+            print(f"[*] Metadata parse notice: {e}")
+
+    if ctx.room.name.startswith("outbound-"):
+        direction = "OUTBOUND"
+
+    print(f"User joined room: {ctx.room.name} | Direction: {direction} | Caller: {caller_name} | Course: {course_inquired}")
+
+    # 3. Call orchestrator database record (non-blocking)
+    orchestrator = CallOrchestrator(
+        room_name=ctx.room.name,
+        caller=caller_name,
+        phone_number=caller_phone,
+        direction=direction,
+        course_inquired=course_inquired,
+    )
+    asyncio.create_task(orchestrator.start_call())
+
+    # Live action tools for agent
+    @llm.function_tool(
+        name="transfer_to_support_team",
+        description="Transfer the caller to an available human customer support advisor from the 5-member admissions team (e.g. Sarah Jenkins on Ext 101, Hamza Ali on Ext 102, or any available advisor)."
+    )
+    async def transfer_to_support_team(advisor_name: str, extension: str, reason: str) -> str:
+        orchestrator.set_disposition("TRANSFERRED", transferred_to=f"{advisor_name} ({extension})", score=95)
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                await client.post("http://127.0.0.1:3000/api/team/transfer", json={
+                    "callId": orchestrator.call_id,
+                    "customerName": caller_name,
+                    "phoneNumber": caller_phone,
+                    "courseInquired": course_inquired,
+                    "leadScore": 95,
+                    "preferredMember": advisor_name,
+                    "transferSummary": f"Caller {caller_name} wants to finalize enrollment for {course_inquired}. Reason: {reason}."
+                })
+        except Exception as e:
+            print(f"[*] Handoff screen-pop dispatch note: {e}")
+        return f"Successfully transferring caller to {advisor_name} on extension {extension} for {reason}."
+
+    @llm.function_tool(
+        name="schedule_callback",
+        description="Schedule a callback when the caller is busy, in a meeting, or requests a callback."
+    )
+    async def schedule_callback(preferred_time: str, notes: str) -> str:
+        orchestrator.set_disposition("CALLBACK_SCHEDULED", scheduled_callback=preferred_time, score=75)
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                # 1. Register in ScheduledCallback table for team members
+                await client.post("http://127.0.0.1:3000/api/callbacks", json={
+                    "customerName": caller_name,
+                    "phoneNumber": caller_phone,
+                    "course": course_inquired,
+                    "scheduledTime": preferred_time,
+                    "agentAssigned": "Sarah Jenkins (Ext 101)",
+                    "notes": f"{notes} (Requested by caller during call with Sonia)",
+                })
+                # 2. Update Lead record status to SCHEDULED_CALL with notes
+                await client.patch("http://127.0.0.1:3000/api/leads", json={
+                    "phoneNumber": caller_phone,
+                    "status": "SCHEDULED_CALL",
+                    "disposition": "CALLBACK_SCHEDULED",
+                    "scheduledCallback": preferred_time,
+                    "humanNotes": f"[AI Sonia Callback Scheduled • {preferred_time}]: {notes}",
+                })
+        except Exception as e:
+            print(f"[*] Notice during schedule_callback API sync: {e}")
+        return f"Callback successfully scheduled for {preferred_time}."
+
+    @llm.function_tool(
+        name="mark_lead_disposition",
+        description="Tag the call disposition when the call concludes (e.g. NOT_INTERESTED, ENROLLED, COLD)."
+    )
+    async def mark_lead_disposition(disposition: str, reason: str) -> str:
+        score = 20 if disposition.upper() == "NOT_INTERESTED" else (98 if disposition.upper() == "ENROLLED" else 50)
+        orchestrator.set_disposition(disposition, score=score)
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                lead_status = "NOT_CONVERTED" if disposition.upper() == "NOT_INTERESTED" else ("CONVERTED" if disposition.upper() == "ENROLLED" else ("SCHEDULED_CALL" if "CALLBACK" in disposition.upper() else "IN_PROGRESS"))
+                await client.patch("http://127.0.0.1:3000/api/leads", json={
+                    "phoneNumber": caller_phone,
+                    "status": lead_status,
+                    "disposition": disposition,
+                    "humanNotes": f"[AI Disposition • {disposition}]: {reason}",
+                })
+        except Exception as e:
+            print(f"[*] Notice during mark_lead_disposition API sync: {e}")
+        return f"Lead marked as {disposition}: {reason}."
+
+    api_key = os.getenv("GOOGLE_API_KEY")
+
+    # 4. Use optimized Silero VAD model with fast, accurate silence detection
+    vad_model = getattr(ctx.proc, "userdata", {}).get("vad") if hasattr(ctx, "proc") else None
+    if not vad_model:
+        vad_model = silero.VAD.load(min_silence_duration=0.30, min_speech_duration=0.08, activation_threshold=0.55)
+
+    # 5. Initialize Ultra-Fast Streaming STT (Deepgram Nova-3) with balanced 400ms endpointing
+    print("[*] Active STT: Deepgram Nova-3 Ultra-Fast Streaming STT")
+    stt_instance = deepgram.STT(
+        model="nova-3",
+        language="en-GB",
+        punctuate=True,
+        smart_format=True,
+        no_delay=True,
+        endpointing_ms=300,
+        keyterm=[
+            "Inspire London College",
+            "UKPD Academy",
+            "Phlebotomy",
+            "Focus Awards",
+            "Focus",
+            "Qualifi",
+            "OTHM",
+            "NOCN",
+            "iCQ",
+            "ATHE",
+            "AET",
+            "DET",
+            "Education and Training",
+            "Award in Education and Training",
+            "CPD",
+            "Level 1",
+            "Level 2",
+            "Level 3",
+            "Level 4",
+            "Level 5",
+            "Level 7",
+            "Health and Safety",
+            "CSCS",
+            "installment",
+            "installments",
+            "London",
+            "diploma",
+            "certificate",
+            "OFQUAL",
+            "refund",
+            "policy",
+        ]
+    )
+
+    # 6. Initialize LLMs with Groq Primary & Resilient Gemini Fallback
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    print(f"[*] GROQ key loaded: {bool(groq_api_key)}")
+    gemini_primary = SafeGeminiLLM(
+        api_key=api_key,
+        model="gemini-3.5-flash-lite",
+        temperature=0.35,
+        max_output_tokens=120,
+    )
+    gemini_secondary = SafeGeminiLLM(
+        api_key=api_key,
+        model="gemini-flash-lite-latest",
+        temperature=0.35,
+        max_output_tokens=120,
+    )
+
+    llm_list = []
+    if groq_api_key:
+        print("[*] Primary LLM in use: Groq (openai/gpt-oss-20b, timeout: 3.0s)")
+        primary_groq = groq.LLM(
+            model="openai/gpt-oss-20b",
+            api_key=groq_api_key,
+            temperature=0.35,
+            max_completion_tokens=120,
+        )
+        llm_list.append(primary_groq)
+        adapter_timeout = 3.0
+    else:
+        print("[*] Notice: GROQ_API_KEY not set. Primary LLM in use: SafeGeminiLLM (timeout: 10.5s)")
+        adapter_timeout = 10.5
+
+    llm_list.extend([gemini_primary, gemini_secondary])
+
+    resilient_llm = llm.FallbackAdapter(
+        llm=llm_list,
+        attempt_timeout=adapter_timeout,
+        max_retry_per_llm=1,
+        retry_interval=0.1,
+    )
+
+    # 7. Initialize Cartesia Sonic TTS (Natural British Voice from CARTESIA_VOICE_ID env)
+    cartesia_voice = os.environ["CARTESIA_VOICE_ID"]
+    active_tts = cartesia.TTS(
+        model="sonic-3",
+        voice=cartesia_voice,
+        api_key=os.environ.get("CARTESIA_API_KEY"),
+    )
+    # Deepgram TTS fallback kept for reference:
+    # active_tts = deepgram.TTS(model="aura-asteria-en")
+
+    # 8. English Semantic Turn Detector Model
+    turn_detector_instance = EnglishModel()
+
+    session = agents.AgentSession(
+        vad=vad_model,
+        stt=stt_instance,
+        llm=resilient_llm,
+        tts=active_tts,
+        tts_text_transforms=[
+            text_transforms.filter_markdown,
+            text_transforms.filter_emoji,
+            custom_speech_cleaner,
+        ],
+        turn_handling={
+            "turn_detection": turn_detector_instance,
+            "endpointing": {
+                "mode": "dynamic",
+                "min_delay": 0.4,
+                "max_delay": 3.0,
+            },
+            "interruption": {
+                "enabled": True,
+                "mode": "vad",
+                "min_duration": 0.5,
+                "min_words": 1,
+                "resume_false_interruption": True,
+            },
+            "preemptive_generation": {
+                "enabled": True,
+            },
+        },
+        aec_warmup_duration=0.0,
+        use_tts_aligned_transcript=False,
+        user_away_timeout=8.0,
+    )
+
+    # Metrics collection tracker (EOU delay | LLM TTFT | TTS TTFB | LLM provider)
+    current_turn_metrics = {"eou_delay": None, "llm_ttft": None, "tts_ttfb": None, "llm_provider": None}
+
+    @session.on("metrics_collected")
+    def on_metrics_collected(ev):
+        try:
+            m = getattr(ev, "metrics", ev)
+            m_type = getattr(m, "type", "")
+            if m_type == "eou":
+                current_turn_metrics["eou_delay"] = getattr(m, "end_of_utterance_delay", None)
+            elif m_type == "llm":
+                current_turn_metrics["llm_ttft"] = getattr(m, "ttft", None)
+                label = getattr(m, "label", "") or ""
+                if "groq" in label.lower():
+                    current_turn_metrics["llm_provider"] = "Groq"
+                elif "google" in label.lower() or "gemini" in label.lower():
+                    current_turn_metrics["llm_provider"] = "Gemini"
+                else:
+                    current_turn_metrics["llm_provider"] = label or "Unknown"
+            elif m_type == "tts":
+                current_turn_metrics["tts_ttfb"] = getattr(m, "ttfb", None)
+                # When TTS completes, print full turn summary line
+                eou_str = f"{current_turn_metrics['eou_delay']*1000:.0f}ms" if current_turn_metrics['eou_delay'] is not None else "N/A"
+                ttft_str = f"{current_turn_metrics['llm_ttft']*1000:.0f}ms" if current_turn_metrics['llm_ttft'] is not None else "N/A"
+                ttfb_str = f"{current_turn_metrics['tts_ttfb']*1000:.0f}ms" if current_turn_metrics['tts_ttfb'] is not None else "N/A"
+                provider_str = current_turn_metrics['llm_provider'] or ("Groq" if groq_api_key else "Gemini")
+                print(f"[TURN METRICS] EOU delay: {eou_str} | LLM TTFT: {ttft_str} | TTS TTFB: {ttfb_str} | LLM: {provider_str}")
+                # Reset turn metrics for next turn
+                current_turn_metrics.update({"eou_delay": None, "llm_ttft": None, "tts_ttfb": None, "llm_provider": None})
+        except Exception as ex:
+            print(f"[*] Notice in metrics_collected: {ex}")
+
+    # Calculate UK business hour greeting
+    try:
+        uk_hour = (datetime.now(timezone.utc) + timedelta(hours=1)).hour
+    except Exception:
+        uk_hour = 11
+    time_greeting = "Good morning" if uk_hour < 12 else "Good afternoon"
+
+    # State tracking for Smart Greeting & Instant Intro
+    greeting_spoken = False
+    intro_spoken = False
+    greeting_lock = asyncio.Lock()
+    timer_task = None
+
+    async def speak_greeting(reason="timeout"):
+        nonlocal greeting_spoken
+        async with greeting_lock:
+            if greeting_spoken:
+                return
+            greeting_spoken = True
+            if direction == "OUTBOUND":
+                greeting = f"{time_greeting}! Am I speaking with {lead_name}?"
+            else:
+                greeting = "Hello! Thank you for calling Inspire London College, my name is Sonia. Who do I have the pleasure of speaking with today?"
+            print(f"[*] Speaking initial greeting ({reason}): '{greeting}'")
+            try:
+                await session.say(greeting, allow_interruptions=True)
+                print(f"[*] Initial greeting finished speaking successfully.")
+            except Exception as e:
+                print(f"[!] Error speaking greeting: {e}")
+
+    async def initial_greeting_timer():
+        await asyncio.sleep(0.35)
+        if not greeting_spoken:
+            await speak_greeting(reason="instant_greeting")
+
+    # 7. Real-Time Event Listeners for transcripts & state updates
+    @session.on("user_input_transcribed")
+    def on_user_input(ev):
+        text = getattr(ev, "transcript", "").strip()
+        if getattr(ev, "is_final", False) and text:
+            print(f"[Deepgram STT Final]: {text}")
+            # If caller speaks first (says "Hello" or anything), immediately trigger greeting!
+            if not greeting_spoken:
+                if timer_task and not timer_task.done():
+                    timer_task.cancel()
+                asyncio.create_task(speak_greeting(reason="caller_spoke_first"))
+
+    # Proactive Contextual Follow-up when Caller goes silent during conversation
+    @session.on("user_state_changed")
+    def on_user_state_changed(ev):
+        if ev.new_state == "away" and greeting_spoken and getattr(session, "agent_state", "") != "speaking":
+            print("[*] Caller silent for 8s -> Proactively checking in...")
+            session.generate_reply(
+                instructions="Warmly check if the caller is still on the line: 'Hello, are you still there?'"
+            )
+
+    @session.on("conversation_item_added")
+    def on_conversation_item_added(ev):
+        role = getattr(ev.item, "role", "unknown")
+        text = getattr(ev.item, "text_content", None) or getattr(ev.item, "content", None)
+        if text:
+            print(f"[{role.upper()}]: {text}")
+            asyncio.create_task(orchestrator.log_transcript(role, text))
+
+        # Enforce sliding conversation window (max 8 items) to ensure millisecond LLM speed
+        try:
+            if hasattr(session, "history") and session.history:
+                session.history.truncate(max_items=8)
+        except Exception as e:
+            print(f"[*] History truncate notice: {e}")
+
+    # 8. Disconnect handlers (detect when caller hangs up or room closes)
+    disconnect_event = asyncio.Event()
+
+    @ctx.room.on("participant_disconnected")
+    def on_participant_disconnected(p):
+        print(f"[*] Caller disconnected from room: {p.identity}")
+        disconnect_event.set()
+
+    @ctx.room.on("disconnected")
+    def on_disconnected(reason):
+        print(f"[*] Room disconnected: {reason}")
+        disconnect_event.set()
+
+    # 9. Start session with dynamic instructions and action tools
+    if direction == "OUTBOUND":
+        active_instructions = build_outbound_instructions(
+            lead_name=lead_name,
+            course_inquired=course_inquired
+        )
+        active_tools = [
+            transfer_to_support_team,
+            schedule_callback,
+            mark_lead_disposition,
+            search_website
+        ]
+    else:
+        active_instructions = INBOUND_SYSTEM_INSTRUCTIONS
+        active_tools = [
+            search_website,
+            check_student_enrollment,
+            transfer_to_support_team,
+            schedule_callback
+        ]
+
+    await session.start(
+        room=ctx.room,
+        agent=agents.Agent(
+            instructions=active_instructions,
+            tools=active_tools
+        ),
+        record={"audio": True, "traces": False}
+    )
+
+    # 10. Start initial greeting timer (Dual trigger: triggers on caller 'Hello' OR 2.5s silence)
+    timer_task = asyncio.create_task(initial_greeting_timer())
+
+    # 11. Keep entrypoint coroutine active until the call finishes
+    await disconnect_event.wait()
+
+    if timer_task and not timer_task.done():
+        timer_task.cancel()
+
+    # 12. Gracefully close agent session to flush all audio recordings to disk
+    try:
+        await session.aclose()
+        # Brief pause to ensure Windows file system flushes encoder stream to disk
+        await asyncio.sleep(0.35)
+    except Exception as e:
+        print(f"[*] Notice during session aclose: {e}")
+
+    # 13. Locate recorded audio and upload to PostgreSQL database & dashboard storage
+    try:
+        session_dir = ctx.session_directory
+        audio_files = list(session_dir.glob("*.ogg")) + list(session_dir.glob("*.wav")) + list(session_dir.rglob("*.ogg"))
+        if not audio_files:
+            # Fallback: check TEMP directory for recently created audio.ogg within last 5 minutes
+            import tempfile, glob
+            recent_ogg = sorted(
+                glob.glob(os.path.join(tempfile.gettempdir(), "*", "audio.ogg")),
+                key=os.path.getmtime,
+                reverse=True
+            )
+            if recent_ogg and (time.time() - os.path.getmtime(recent_ogg[0])) < 300:
+                audio_files = [recent_ogg[0]]
+
+        if audio_files:
+            recording_path = str(audio_files[0])
+            size_kb = round(os.path.getsize(recording_path) / 1024, 1)
+            print(f"[*] Call audio recording ready: {recording_path} ({size_kb} KB)")
+            await orchestrator.save_recording(recording_path)
+        else:
+            print(f"[*] No audio recording found in session directory: {session_dir}")
+    except Exception as e:
+        print(f"[*] Error saving call audio recording: {e}")
+
+    # 14. Finalize database call duration, AI summary, and recording URL (single unified record)
+    await orchestrator.end_call(final_status="ANSWERED")
+
+def prewarm(proc: agents.JobProcess):
+    """Preload VAD into RAM so process starts immediately with zero delay."""
+    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.30, min_speech_duration=0.08, activation_threshold=0.55)
+
+if __name__ == "__main__":
+    _startup_groq_key = os.getenv("GROQ_API_KEY")
+    print(f"[*] GROQ key loaded: {bool(_startup_groq_key)}")
+    if _startup_groq_key:
+        print("[*] Primary LLM in use: Groq (openai/gpt-oss-20b, timeout: 3.0s)")
+    else:
+        print("[*] Notice: GROQ_API_KEY not set. Primary LLM in use: SafeGeminiLLM (timeout: 10.5s)")
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+            load_threshold=float("inf"),
+            agent_name="voice-agent",
+            num_idle_processes=3,
+            initialize_process_timeout=30.0,
+        )
+    )

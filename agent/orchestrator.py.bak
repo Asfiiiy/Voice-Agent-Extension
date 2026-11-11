@@ -1,0 +1,282 @@
+import asyncio
+import os
+import time
+import json
+from typing import Optional, List, Dict
+import httpx
+
+API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:3000/api")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+_shared_client: Optional[httpx.AsyncClient] = None
+
+def get_http_client() -> httpx.AsyncClient:
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(timeout=12.0)
+    return _shared_client
+
+class CallOrchestrator:
+    def __init__(
+        self,
+        room_name: str,
+        caller: str = "MicroSIP Caller",
+        phone_number: str = "MicroSIP (100)",
+        direction: str = "INBOUND",
+        course_inquired: str = "General Qualification",
+        lead_id: Optional[str] = None,
+    ):
+        self.room_name = room_name
+        self.caller = caller
+        self.phone_number = phone_number
+        self.direction = direction.upper()
+        self.course_inquired = course_inquired
+        self.lead_id = lead_id
+
+        self.start_time: float = time.time()
+        self.call_id: Optional[str] = None
+        self.status: str = "ANSWERED"
+        self.disposition: str = "ANSWERED"
+        self.transferred_to: Optional[str] = None
+        self.scheduled_callback: Optional[str] = None
+        self.lead_score: int = 70
+        self.recording_url: Optional[str] = None
+
+        # Accumulated transcript for LLM auto-summary
+        self.transcript_lines: List[Dict[str, str]] = []
+
+    def set_disposition(
+        self,
+        disposition: str,
+        transferred_to: Optional[str] = None,
+        scheduled_callback: Optional[str] = None,
+        score: Optional[int] = None,
+    ):
+        """Sets the call disposition from agent tools or conversational outcomes."""
+        self.disposition = disposition.upper()
+        if transferred_to:
+            self.transferred_to = transferred_to
+        if scheduled_callback:
+            self.scheduled_callback = scheduled_callback
+        if score is not None:
+            self.lead_score = score
+        print(f"[Orchestrator] Disposition updated: {self.disposition} | Transferred: {self.transferred_to} | Callback: {self.scheduled_callback}")
+
+    async def log_transcript(self, role: str, text: str):
+        """Records transcript in memory and dispatches to Next.js API endpoint non-blockingly."""
+        clean_text = text.strip()
+        if clean_text:
+            self.transcript_lines.append({"role": role, "text": clean_text})
+
+        try:
+            client = get_http_client()
+            await client.post(
+                f"{API_BASE_URL}/transcripts",
+                json={
+                    "room": self.room_name,
+                    "role": role,
+                    "text": clean_text,
+                },
+            )
+        except Exception as e:
+            print(f"[Orchestrator] Transcript dispatch error: {e}")
+
+    async def start_call(self):
+        """Creates initial call database entry via Next.js Prisma API."""
+        self.start_time = time.time()
+        try:
+            client = get_http_client()
+            if self.direction == "OUTBOUND":
+                # Outbound call initial registration
+                res = await client.post(
+                    f"{API_BASE_URL}/calls/outbound",
+                    json={
+                        "phoneNumber": self.phone_number,
+                        "customerName": self.caller,
+                        "courseInquired": self.course_inquired,
+                        "disposition": "ANSWERED",
+                        "summary": f"Outbound campaign call placed to {self.caller} regarding {self.course_inquired}.",
+                        "leadScore": self.lead_score,
+                        "durationSec": 0,
+                    },
+                )
+            else:
+                # Inbound call registration
+                res = await client.post(
+                    f"{API_BASE_URL}/calls",
+                    json={
+                        "phoneNumber": self.phone_number,
+                        "customerName": self.caller,
+                        "status": "ANSWERED",
+                        "waitTimeSec": 2,
+                        "durationSec": 0,
+                    },
+                )
+
+            if res.status_code in (200, 201):
+                data = res.json()
+                self.call_id = data.get("id") or data.get("call", {}).get("id")
+                print(f"[Orchestrator] {self.direction} Call started: {self.call_id} for {self.caller} ({self.phone_number})")
+            else:
+                print(f"[Orchestrator] Call start returned HTTP {res.status_code}: {res.text}")
+        except Exception as e:
+            print(f"[Orchestrator] Failed to register call start: {e}")
+
+        await self.log_transcript("system", f"Voice agent connected with {self.caller} ({self.direction})")
+
+    async def _generate_ai_summary(self, full_dialogue: str) -> Dict[str, any]:
+        """Calls Google Gemini API to generate a structured written call summary & score."""
+        if not full_dialogue.strip() or not GOOGLE_API_KEY:
+            # Fallback smart heuristic summary
+            return {
+                "summary": f"Call session completed between {self.caller} and Sonia (Senior Admissions Advisor). Handled inquiry regarding {self.course_inquired} with accredited qualification guidelines.",
+                "leadScore": 75 if self.disposition in ("ENROLLED", "TRANSFERRED") else 50,
+                "disposition": self.disposition or "ANSWERED"
+            }
+
+        prompt = (
+            f"Analyze this call transcript between Sonia (Admissions Advisor at Inspire London College) and the student ({self.caller}).\n"
+            f"Call Direction: {self.direction}\n"
+            f"Course Topic: {self.course_inquired}\n\n"
+            f"TRANSCRIPT:\n{full_dialogue}\n\n"
+            "Return a valid JSON object ONLY with these exact keys:\n"
+            "1. 'summary': (2-3 concise, professional sentences summarizing the conversation, caller background, key questions answered, fees/installment mentioned, and next step).\n"
+            "2. 'leadScore': (integer 0 to 100 based on interest and readiness to enroll).\n"
+            "3. 'disposition': (one of: 'ENROLLED', 'TRANSFERRED', 'CALLBACK_SCHEDULED', 'NOT_INTERESTED', 'ANSWERED')"
+        )
+
+        try:
+            client = get_http_client()
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={GOOGLE_API_KEY}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.2, "response_mime_type": "application/json"}
+            }
+            res = await client.post(url, json=payload, timeout=8.0)
+            if res.status_code == 200:
+                data = res.json()
+                text_response = data["candidates"][0]["content"]["parts"][0]["text"]
+                parsed = json.loads(text_response)
+                print(f"[Orchestrator] AI Summary Generated: {parsed.get('summary', '')[:80]}...")
+                return parsed
+        except Exception as e:
+            print(f"[Orchestrator] Notice: Gemini auto-summary fallback used: {e}")
+
+        return {
+            "summary": f"{self.caller} engaged with Sonia regarding {self.course_inquired}. Sonia verified Ofqual regulation and enrollment options. Call concluded with status {self.disposition}.",
+            "leadScore": 85 if self.disposition in ("ENROLLED", "TRANSFERRED") else (60 if self.disposition == "CALLBACK_SCHEDULED" else 30),
+            "disposition": self.disposition or "ANSWERED"
+        }
+
+    async def save_recording(self, file_path: str) -> Optional[str]:
+        """Uploads the local call recording file to Next.js API endpoint."""
+        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            print(f"[Orchestrator] Recording file not found or empty: {file_path}")
+            return None
+
+        target_id = self.call_id or "current"
+        try:
+            client = get_http_client()
+            with open(file_path, "rb") as f:
+                filename = os.path.basename(file_path)
+                files = {"file": (filename, f, "audio/ogg")}
+                data = {"callId": target_id}
+                res = await client.post(
+                    f"{API_BASE_URL}/recordings",
+                    data=data,
+                    files=files,
+                )
+            if res.status_code in (200, 201):
+                result = res.json()
+                rec_url = result.get("recordingUrl")
+                self.recording_url = rec_url
+                print(f"[Orchestrator] Call recording saved successfully: {rec_url}")
+                return rec_url
+            else:
+                print(f"[Orchestrator] Recording upload returned {res.status_code}: {res.text}")
+        except Exception as e:
+            print(f"[Orchestrator] Failed to upload recording: {e}")
+        return None
+
+    async def end_call(self, final_status: str = "ANSWERED"):
+        """Generates AI written call summary, calculates score, and finalizes database records."""
+        duration_sec = int(time.time() - self.start_time)
+        await self.log_transcript("system", f"Call finished. Duration: {duration_sec}s | Disposition: {self.disposition}")
+
+        # Format full dialogue transcript
+        dialogue_text = "\n".join(
+            f"{'Sonia' if item['role'] == 'assistant' else ('Caller' if item['role'] == 'user' else 'System')}: {item['text']}"
+            for item in self.transcript_lines
+            if item['role'] in ('user', 'assistant')
+        )
+
+        # Generate AI Written Summary & Score
+        ai_data = await self._generate_ai_summary(dialogue_text)
+        summary = ai_data.get("summary") or "Call completed with Sonia."
+        score = ai_data.get("leadScore", self.lead_score)
+        disposition = self.disposition if self.disposition != "ANSWERED" else ai_data.get("disposition", "ANSWERED")
+
+        client = get_http_client()
+
+        # If a call ID was created at start_call (for either INBOUND or OUTBOUND), update it directly!
+        if self.call_id:
+            try:
+                res = await client.patch(
+                    f"{API_BASE_URL}/calls/{self.call_id}",
+                    json={
+                        "status": final_status,
+                        "durationSec": duration_sec,
+                        "summary": summary,
+                        "transcript": dialogue_text,
+                        "disposition": disposition,
+                        "courseInquired": self.course_inquired,
+                        "leadScore": score,
+                        "transferredTo": self.transferred_to,
+                        "scheduledCallback": self.scheduled_callback,
+                        "recordingUrl": self.recording_url,
+                    },
+                )
+                print(f"[Orchestrator] {self.direction} call record {self.call_id} updated with summary & recording: HTTP {res.status_code}")
+            except Exception as e:
+                print(f"[Orchestrator] Failed to update call record: {e}")
+        elif self.direction == "OUTBOUND":
+            try:
+                # Fallback: create fresh record if no call_id was registered at start
+                res = await client.post(
+                    f"{API_BASE_URL}/calls/outbound",
+                    json={
+                        "phoneNumber": self.phone_number,
+                        "customerName": self.caller,
+                        "courseInquired": self.course_inquired,
+                        "disposition": disposition,
+                        "summary": summary,
+                        "transcript": dialogue_text,
+                        "leadScore": score,
+                        "durationSec": duration_sec,
+                        "transferredTo": self.transferred_to,
+                        "scheduledCallback": self.scheduled_callback,
+                        "recordingUrl": self.recording_url,
+                    },
+                )
+                if res.status_code in (200, 201):
+                    self.call_id = res.json().get("call", {}).get("id")
+                print(f"[Orchestrator] Outbound call fallback record saved: HTTP {res.status_code}")
+            except Exception as e:
+                print(f"[Orchestrator] Failed to save outbound call fallback record: {e}")
+
+        # Sync Lead table and Scheduled Callbacks in real time
+        try:
+            lead_status = "NOT_CONVERTED" if disposition.upper() == "NOT_INTERESTED" else ("CONVERTED" if disposition.upper() == "ENROLLED" else ("SCHEDULED_CALL" if "CALLBACK" in disposition.upper() else "IN_PROGRESS"))
+            await client.patch(
+                f"{API_BASE_URL}/leads",
+                json={
+                    "phoneNumber": self.phone_number,
+                    "status": lead_status,
+                    "disposition": disposition,
+                    "leadScore": score,
+                    "scheduledCallback": self.scheduled_callback,
+                    "humanNotes": f"[Call Finished • {disposition} • AI Score: {score}]: {summary}"
+                }
+            )
+        except Exception as lead_sync_err:
+            print(f"[Orchestrator] Notice during Lead final sync: {lead_sync_err}")

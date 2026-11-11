@@ -1,0 +1,424 @@
+# AI Customer Support Call System — Production Requirements
+
+Version: 1.0
+Status: Production-oriented baseline
+Scope: Inbound customer-support calls handled by an AI agent when human agents are unavailable, on leave, outside hours, or have opted into AI coverage.
+
+## 1. Objective
+
+Build a multi-tenant web application that can receive inbound calls through a pluggable telephony provider (e.g. Vonage or another SIP/telephony provider), determine whether AI coverage should answer, conduct a realtime voice conversation, use controlled enterprise knowledge through strict RAG, record/transcribe calls according to policy, and expose live call state and analytics to authorized users.
+
+The system must not depend on a single telephony, LLM, STT, or TTS vendor. Provider configuration must be data-driven and selectable through an administrative settings layer.
+
+## 2. Core Functional Requirements
+
+### 2.1 Tenant and organization management
+- Organizations/tenants are isolated at the database and authorization layers.
+- Users belong to one or more organizations through explicit memberships.
+- Every tenant-owned query is scoped by tenant_id.
+- No client-supplied tenant_id is trusted for authorization.
+- Organization status can be active, suspended, or archived.
+- Per-tenant quotas and provider configuration are supported.
+
+### 2.2 RBAC
+Roles:
+- platform_admin
+- organization_owner
+- organization_admin
+- supervisor
+- agent
+- auditor
+- read_only
+
+Permissions must be granular:
+- calls:read
+- calls:answer
+- calls:record
+- calls:export
+- calls:delete
+- knowledge:read/write/publish
+- prompts:read/write/publish
+- providers:read/write/test
+- users:read/invite/disable
+- billing/configuration:read/write
+- audit:read
+- system:admin
+
+Authorization is enforced server-side on every protected operation.
+
+### 2.3 Inbound call flow
+1. Telephony provider sends signed webhook/event.
+2. Gateway validates signature, timestamp, nonce, and provider event ID.
+3. Event is persisted idempotently.
+4. Routing service determines tenant, DID, business hours, agent availability, and AI coverage policy.
+5. If human routing succeeds, AI does not answer.
+6. If AI coverage is active, the call is accepted/bridged into the AI media session.
+7. Media is streamed through the realtime media layer.
+8. STT produces partial/final transcripts.
+9. Conversation state is maintained.
+10. RAG retrieves only authorized/published knowledge.
+11. LLM produces a constrained response.
+12. TTS streams audio back.
+13. Call recording/transcript/summary/events are persisted according to retention policy.
+14. Call ends; asynchronous workers finalize analytics, summaries, audit records, and usage accounting.
+
+### 2.4 Human availability
+Availability states:
+- available
+- busy
+- offline
+- vacation
+- AI_coverage
+- do_not_disturb
+
+Availability changes must be auditable.
+A call must not be answered twice by human and AI due to stale state.
+
+Use short-lived distributed locks and atomic database transitions around routing decisions.
+
+### 2.5 AI personality
+Personality is configuration, not uncontrolled model fine-tuning.
+Store:
+- system policy
+- tone
+- language
+- allowed/disallowed behavior
+- escalation policy
+- greeting
+- closing
+- organization terminology
+- maximum response length
+- interruption behavior
+
+Prompt versions are immutable after publication. Draft -> review -> published -> archived.
+
+### 2.6 Strict RAG
+RAG must be allow-listed:
+- only published documents/chunks are retrievable;
+- tenant_id is mandatory in every retrieval query;
+- collection/namespace is tenant-specific;
+- metadata filters include tenant_id, knowledge_status, document_version and optionally department;
+- retrieval top-k is configurable but bounded;
+- no retrieval result means the model must not invent an answer;
+- confidence threshold determines answer vs clarification/escalation;
+- citations/source IDs are retained internally for traceability;
+- prompt injection in retrieved content must be treated as untrusted data;
+- retrieved text cannot override system policy.
+
+Knowledge lifecycle:
+upload -> virus/file validation -> extraction -> chunking -> embedding -> indexing -> review -> publish -> archive.
+
+### 2.7 LLM provider rotation
+Provider pool contains:
+- provider
+- model
+- endpoint
+- credentials reference
+- region
+- max concurrency
+- requests/minute
+- tokens/minute
+- priority
+- health state
+- circuit-breaker state
+- timeout
+- cost metadata
+
+Allocation algorithm:
+1. filter enabled providers compatible with request;
+2. filter unhealthy/open-circuit providers;
+3. enforce tenant/model policy;
+4. enforce rate/concurrency limits;
+5. choose by weighted priority/latency/cost policy;
+6. on retryable failure, select another eligible provider;
+7. never blindly retry non-idempotent external actions.
+
+Credentials are stored in a secret manager or encrypted secret store, never plaintext in normal DB responses.
+
+### 2.8 STT
+Requirements:
+- streaming partial transcripts;
+- final transcript;
+- timestamps;
+- speaker/track association where available;
+- configurable language;
+- endpointing/VAD;
+- provider timeout;
+- provider fallback;
+- transcript confidence where available.
+
+### 2.9 TTS
+Requirements:
+- streaming audio;
+- voice/provider selection;
+- tenant-specific voice;
+- fallback voice;
+- configurable speaking rate;
+- interruption/barge-in support;
+- audio format compatible with telephony media;
+- provider health and latency metrics.
+
+### 2.10 Realtime media
+- WebRTC/LiveKit is used for realtime media orchestration where appropriate.
+- Telephony RTP/SIP/media gateway integration must be separated from application business logic.
+- Audio frames are never persisted by default solely for debugging.
+- Noise suppression, echo cancellation and voice activity detection must be applied at the appropriate media boundary.
+- Backpressure is mandatory between media, STT, LLM and TTS stages.
+- Slow consumers must not exhaust process memory.
+
+### 2.11 Recording
+Recording policy is tenant-configurable and must respect applicable consent/legal requirements.
+Recordings require:
+- encryption at rest;
+- access control;
+- retention period;
+- deletion workflow;
+- audit logging;
+- non-public object storage;
+- signed/time-limited download URLs.
+
+### 2.12 Live dashboard
+Frontend receives live state through SSE:
+- active calls
+- call status
+- current agent/AI assignment
+- transcript partial/final events if permitted
+- latency metrics
+- errors
+- escalation events
+
+SSE connections are authenticated and tenant-scoped.
+Never broadcast one tenant's events to another tenant.
+
+## 3. Data Requirements
+
+Primary relational DB: PostgreSQL.
+
+Core tables:
+- organizations
+- users
+- memberships
+- roles/permissions
+- agents
+- agent_availability
+- phone_numbers
+- telephony_providers
+- provider_credentials
+- provider_allocations
+- provider_health
+- calls
+- call_participants
+- call_events
+- call_recordings
+- transcripts
+- transcript_segments
+- conversations
+- messages
+- knowledge_bases
+- knowledge_documents
+- knowledge_versions
+- knowledge_chunks
+- prompts
+- prompt_versions
+- voices
+- models
+- routing_policies
+- escalation_rules
+- usage_records
+- quotas
+- jobs
+- webhook_events
+- audit_logs
+- idempotency_keys
+- outbox_events
+
+Redis:
+- distributed locks
+- rate limits
+- short-lived call/session state
+- SSE fanout/pubsub
+- provider concurrency counters
+- cache
+- job queues if selected
+
+Vector DB:
+- Qdrant or equivalent, with strict tenant/knowledge metadata filters.
+
+Object storage:
+- S3-compatible storage for recordings, uploaded documents, exports and generated artifacts.
+
+## 4. API Requirements
+
+Public/provider endpoints:
+- POST /v1/webhooks/telephony/{provider}
+- POST /v1/webhooks/llm/{provider}
+- POST /v1/webhooks/stt/{provider}
+- POST /v1/webhooks/tts/{provider}
+
+Application API:
+- POST /v1/auth/login
+- POST /v1/auth/refresh
+- POST /v1/auth/logout
+- GET /v1/me
+- GET /v1/calls
+- GET /v1/calls/{call_id}
+- POST /v1/calls/{call_id}/escalate
+- POST /v1/calls/{call_id}/terminate
+- GET /v1/calls/{call_id}/transcript
+- GET /v1/calls/{call_id}/recording
+- GET /v1/events/stream
+- CRUD /v1/knowledge/*
+- CRUD /v1/prompts/*
+- CRUD /v1/providers/*
+- CRUD /v1/voices/*
+- CRUD /v1/models/*
+- CRUD /v1/routing-policies/*
+- CRUD /v1/users/*
+- GET /v1/audit-logs
+- GET /v1/health
+- GET /v1/readiness
+
+AI service:
+- POST /internal/v1/realtime/session
+- POST /internal/v1/rag/retrieve
+- POST /internal/v1/llm/generate
+- POST /internal/v1/tts/synthesize
+- POST /internal/v1/stt/session
+- POST /internal/v1/conversation/decision
+Internal APIs require service authentication and must not be public.
+
+## 5. Non-Functional Requirements
+
+Latency targets:
+- webhook acknowledgement: <250 ms under normal load;
+- routing decision: <100 ms excluding provider network latency;
+- first partial STT: target <500 ms;
+- LLM first token: target <700 ms where provider permits;
+- TTS first audio: target <400 ms after usable text;
+- end-to-end first response: target <1.5 s under healthy-provider conditions.
+
+These are engineering targets, not guarantees.
+
+Availability:
+- API target 99.9% monthly for production baseline;
+- no single provider should cause total AI outage;
+- graceful degradation when LLM/STT/TTS is unavailable.
+
+Scalability:
+- stateless HTTP services horizontally scalable;
+- workers horizontally scalable;
+- DB pooling;
+- bounded queues;
+- Redis connection pooling;
+- per-tenant and global concurrency limits.
+
+## 6. Reliability and Concurrency
+
+Required:
+- idempotency keys;
+- unique constraints for external event IDs;
+- transactional outbox;
+- optimistic locking with version columns;
+- SELECT ... FOR UPDATE for short critical transitions;
+- Redis distributed lock only where a cross-process lock is necessary;
+- lock TTL and ownership token;
+- no lock held during slow provider calls;
+- retry with exponential backoff and jitter;
+- dead-letter queue;
+- circuit breakers;
+- timeout budgets;
+- cancellation propagation;
+- graceful shutdown;
+- duplicate event handling.
+
+Never use an in-process mutex as the sole protection for multi-instance production state.
+
+## 7. Security
+
+- TLS everywhere externally.
+- Service-to-service authentication.
+- Secure, HttpOnly, SameSite cookies or short-lived access tokens with refresh rotation.
+- CSRF protection when cookie authentication is used.
+- Password hashing with Argon2id.
+- MFA support for administrators.
+- RBAC + tenant isolation.
+- IDOR prevention: object access must be resolved from authenticated principal + tenant + permission, not only URL ID.
+- Input validation using strict schemas.
+- Output encoding.
+- SSRF protection for any user-supplied URLs.
+- File type validation and malware scanning.
+- Secret rotation.
+- Encryption at rest.
+- Audit logging.
+- PII minimization.
+- Configurable retention/deletion.
+- Request body size limits.
+- Webhook replay protection.
+- Security headers.
+- Dependency and container scanning.
+- No secrets in images, Git, logs or frontend bundles.
+
+## 8. Observability
+
+Use:
+- OpenTelemetry
+- Prometheus metrics
+- Grafana dashboards
+- structured JSON logs
+- distributed tracing
+- Sentry or equivalent error tracking
+
+Correlation IDs:
+request_id
+trace_id
+tenant_id
+call_id
+conversation_id
+provider_request_id
+
+Never log raw payment data, credentials, authorization headers or unrestricted call audio.
+
+## 9. Testing
+
+Required:
+- unit tests
+- integration tests
+- API contract tests
+- provider adapter tests
+- RAG isolation tests
+- authorization/IDOR tests
+- webhook replay/idempotency tests
+- race/concurrency tests
+- load tests
+- soak tests
+- failure-injection tests
+- prompt-injection tests
+- provider failover tests
+- DB migration tests
+- backup/restore tests
+- security scanning
+- end-to-end call simulations
+
+## 10. Deployment
+
+All services containerized with Docker.
+Local development may use Docker Compose.
+Production should use Kubernetes or an equivalent orchestrator once multi-instance scaling is required.
+
+No service should rely on localhost-only assumptions.
+
+## 11. Acceptance Criteria
+
+A release is production-ready only when:
+- duplicate telephony events do not duplicate calls;
+- one call cannot be assigned to both AI and human simultaneously;
+- tenant A cannot read tenant B data;
+- unauthorized roles cannot access protected operations;
+- stale browser data cannot overwrite newer configuration;
+- provider failure triggers bounded fallback;
+- RAG cannot return unpublished/cross-tenant data;
+- a worker crash does not permanently lose a job;
+- SSE reconnect does not duplicate uncontrolled subscriptions;
+- recordings are private and auditable;
+- migrations and backups are tested;
+- all critical paths have metrics, tracing and alerts.

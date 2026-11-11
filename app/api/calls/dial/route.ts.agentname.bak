@@ -1,0 +1,92 @@
+import { NextResponse, NextRequest } from "next/server";
+import { RoomServiceClient, AccessToken, AgentDispatchClient } from "livekit-server-sdk";
+
+const LIVEKIT_URL = process.env.LIVEKIT_URL || process.env.NEXT_PUBLIC_LIVEKIT_URL || "";
+const API_KEY = process.env.LIVEKIT_API_KEY || "";
+const API_SECRET = process.env.LIVEKIT_API_SECRET || "";
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const { leadId, leadName, phoneNumber, courseInquired } = body;
+
+    const safeLeadId = (leadId || "lead").toString().replace(/[^a-zA-Z0-9_-]/g, "");
+    const roomName = `outbound-${safeLeadId}-${Date.now()}`;
+    const metadata = JSON.stringify({
+      direction: "outbound",
+      leadId: leadId || undefined,
+      leadName: leadName || "Prospective Student",
+      phoneNumber: phoneNumber || "+44 7000 000000",
+      courseInquired: courseInquired || "General Qualification",
+    });
+
+    const httpUrl = (LIVEKIT_URL || "").replace(/^ws/, "http");
+
+    // 1. Create room with metadata on LiveKit Server
+    if (httpUrl && API_KEY && API_SECRET) {
+      try {
+        const roomService = new RoomServiceClient(
+          httpUrl,
+          API_KEY,
+          API_SECRET
+        );
+
+        await roomService.createRoom({
+          name: roomName,
+          metadata: metadata,
+          emptyTimeout: 300,
+          maxParticipants: 5,
+        });
+      } catch (err) {
+        console.warn("createRoom notice:", err);
+      }
+
+      // 2. Explicitly dispatch Python voice agent worker to this outbound room
+      try {
+        const dispatchClient = new AgentDispatchClient(httpUrl, API_KEY, API_SECRET);
+        await dispatchClient.createDispatch(roomName, "voice-agent", { metadata });
+        console.log(`[Agent Dispatch] Dispatched voice-agent to room ${roomName}`);
+      } catch (dispErr) {
+        console.warn("createDispatch voice-agent notice:", dispErr);
+        try {
+          const dispatchClient = new AgentDispatchClient(httpUrl, API_KEY, API_SECRET);
+          await dispatchClient.createDispatch(roomName, "", { metadata });
+        } catch (fallbackErr) {
+          console.error("Agent fallback dispatch failed:", fallbackErr);
+        }
+      }
+    }
+
+    // Generate participant token for agent or web caller
+    const at = new AccessToken(API_KEY, API_SECRET, {
+      identity: `outbound-lead-${Date.now()}`,
+      name: leadName || "Prospective Student",
+      metadata: metadata,
+      ttl: "2h",
+    });
+
+    at.addGrant({
+      room: roomName,
+      roomJoin: true,
+      canPublish: true,
+      canSubscribe: true,
+    });
+
+    const token = await at.toJwt();
+    const livekitUrl = LIVEKIT_URL || process.env.NEXT_PUBLIC_LIVEKIT_URL || "wss://customcall-f7c2gkei.livekit.cloud";
+
+    return NextResponse.json({
+      success: true,
+      roomName,
+      token,
+      url: livekitUrl,
+      message: `Outbound call room created for ${leadName} (${courseInquired})`,
+    });
+  } catch (error) {
+    console.error("Failed to initiate outbound call room:", error);
+    return NextResponse.json(
+      { error: "Failed to initiate outbound call" },
+      { status: 500 }
+    );
+  }
+}

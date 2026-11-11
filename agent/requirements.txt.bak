@@ -1,0 +1,9 @@
+livekit-agents==1.8.2
+livekit-plugins-google==1.8.2
+livekit-plugins-silero==1.8.2
+python-dotenv
+httpx
+qdrant-client
+edge-tts
+livekit-plugins-deepgram
+

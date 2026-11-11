@@ -1,0 +1,394 @@
+{
+  "health_nursing": {
+    "category_id": "health_nursing",
+    "display_name": "Health, Nursing & Social Care",
+    "keywords": [
+      "nursing",
+      "nurse",
+      "health",
+      "healthcare",
+      "care",
+      "social care",
+      "care worker",
+      "carer",
+      "hsc",
+      "hospital",
+      "adult care",
+      "dementia",
+      "clinical",
+      "medication",
+      "care assistant",
+      "support worker",
+      "health care"
+    ],
+    "primary_recommendation": {
+      "title": "Qualifi - Level 3 Diploma in Health and Social Care",
+      "level": "Level 3",
+      "awarding_body": "Qualifi",
+      "suitability": "Our top recommendation for anyone aiming for a University Nursing, Midwifery, or Healthcare degree, or advancing into senior care roles. Fully Ofqual-regulated.",
+      "duration": "Standard 6-12 months, or 4-month Fast Track accelerated plan.",
+      "fee_summary": "£679 in full, or £75 deposit + 10 monthly payments of £45.40."
+    },
+    "secondary_recommendations": [
+      {
+        "title": "OTHM - Level 3 Foundation Diploma in Health and Social Care",
+        "level": "Level 3",
+        "awarding_body": "OTHM Qualifications",
+        "suitability": "Alternative foundation diploma for direct progression to UK health degree programs."
+      },
+      {
+        "title": "NOCN Level 3 Diploma in Adult Care (England)",
+        "level": "Level 3",
+        "awarding_body": "NOCN",
+        "suitability": "Ideal for practicing care staff requiring official senior care qualification."
+      },
+      {
+        "title": "Qualifi - Level 5 Extended Diploma in Health and Social Care (University Progression)",
+        "level": "Level 5",
+        "awarding_body": "Qualifi",
+        "suitability": "Equivalent to Years 1 & 2 of a UK Bachelor's degree; direct route to BSc Nursing Top-Up or Registered Care Manager."
+      },
+      {
+        "title": "OTHM - Level 7 Diploma in Health and Social Care Management",
+        "level": "Level 7",
+        "awarding_body": "OTHM Qualifications",
+        "suitability": "Postgraduate qualification for healthcare directors, clinical leaders, and NHS managers."
+      }
+    ],
+    "spoken_pitch": "For nursing and healthcare, our most popular route is the Qualifi Level 3 Diploma in Health and Social Care. It is an Ofqual-regulated qualification widely recognized for university nursing degree entry. Are you looking to progress onto a university nursing degree, or advance within your current care role?"
+  },
+  "it_security": {
+    "category_id": "it_security",
+    "display_name": "Information Technology & Cyber Security",
+    "keywords": [
+      "it",
+      "information technology",
+      "cyber security",
+      "cybersecurity",
+      "computing",
+      "network",
+      "computer",
+      "tech",
+      "software",
+      "ethical hacking",
+      "systems",
+      "cyber"
+    ],
+    "primary_recommendation": {
+      "title": "Qualifi Level 3 Diploma in Cyber Security Management and Operations",
+      "level": "Level 3",
+      "awarding_body": "Qualifi",
+      "suitability": "Our premier program for entering the high-demand cybersecurity sector, covering threat intelligence, incident response, and network security.",
+      "duration": "Standard 6-12 months, or 4-month Fast Track accelerated option.",
+      "fee_summary": "£679 in full, or £75 deposit with flexible monthly payments."
+    },
+    "secondary_recommendations": [
+      {
+        "title": "OTHM Level 3 Foundation Diploma in Information Technology",
+        "level": "Level 3",
+        "awarding_body": "OTHM Qualifications",
+        "suitability": "Great foundation in IT systems, software concepts, and digital technology leading to BSc Computing."
+      },
+      {
+        "title": "Qualifi Level 2 Diploma in Business Beginners in Cyber Security",
+        "level": "Level 2",
+        "awarding_body": "Qualifi",
+        "suitability": "Ideal entry-level introduction for individuals with no prior IT background."
+      },
+      {
+        "title": "Qualifi Level 5 Extended Diploma in Cyber Security",
+        "level": "Level 5",
+        "awarding_body": "Qualifi",
+        "suitability": "Advanced 240-credit qualification equivalent to the first two years of a UK Computer Science degree."
+      }
+    ],
+    "spoken_pitch": "In IT and tech, our top recommendation is the Qualifi Level 3 Diploma in Cyber Security Management and Operations. We also have an OTHM Level 3 in Information Technology if you prefer broader computing. Are you looking specifically at cyber security, or general IT and computing?"
+  },
+  "business_management": {
+    "category_id": "business_management",
+    "display_name": "Business Management & Leadership",
+    "keywords": [
+      "business",
+      "management",
+      "leadership",
+      "administration",
+      "business admin",
+      "manager",
+      "executive",
+      "mba",
+      "strategic management",
+      "commerce",
+      "corporate"
+    ],
+    "primary_recommendation": {
+      "title": "OTHM - Level 3 Diploma in Business Management",
+      "level": "Level 3",
+      "awarding_body": "OTHM Qualifications",
+      "suitability": "Comprehensive foundation in modern business practices, marketing, team leadership, and financial management.",
+      "duration": "Standard 6-12 months, or 4-month Fast Track accelerated option.",
+      "fee_summary": "£679 in full, or £75 deposit + 10 monthly payments."
+    },
+    "secondary_recommendations": [
+      {
+        "title": "Qualifi Level 3 Diploma In Business Management",
+        "level": "Level 3",
+        "awarding_body": "Qualifi",
+        "suitability": "Ofqual-regulated foundation diploma with direct undergraduate degree access."
+      },
+      {
+        "title": "Focus Awards Level 3 Diploma in Business Administration",
+        "level": "Level 3",
+        "awarding_body": "Focus Awards",
+        "suitability": "Perfect for office managers, executive assistants, and business administrators."
+      },
+      {
+        "title": "OTHM - Level 5 Extended Diploma in Business Management",
+        "level": "Level 5",
+        "awarding_body": "OTHM Qualifications",
+        "suitability": "Undergraduate Year 1 & 2 equivalent (240 credits), fast-tracking to a final year BA (Hons) top-up."
+      },
+      {
+        "title": "Qualifi - Level 7 Diploma in Strategic Management and Leadership",
+        "level": "Level 7",
+        "awarding_body": "Qualifi",
+        "suitability": "Postgraduate 120-credit diploma granting advanced entry into an executive UK MBA top-up."
+      }
+    ],
+    "spoken_pitch": "For business, our most popular entry is the Level 3 Diploma in Business Management awarded by OTHM or Qualifi. For experienced managers, we also offer the Level 7 Postgraduate Diploma leading straight to an MBA. Are you starting out in business, or aiming for senior executive and MBA progression?"
+  },
+  "law_legal": {
+    "category_id": "law_legal",
+    "display_name": "Law & Legal Studies",
+    "keywords": [
+      "law",
+      "legal",
+      "business law",
+      "international law",
+      "corporate law",
+      "solicitor",
+      "contract law",
+      "arbitration",
+      "jurisprudence",
+      "llm"
+    ],
+    "primary_recommendation": {
+      "title": "OTHM - Level 7 Diploma in International Business Law",
+      "level": "Level 7",
+      "awarding_body": "OTHM Qualifications",
+      "suitability": "Prestigious 120-credit postgraduate diploma covering International Trade Law, Corporate Governance, Commercial Law, and International Arbitration. Fast-tracks directly to an LLM Master of Laws top-up degree.",
+      "duration": "Standard 6-12 months, or 4-month Fast Track accelerated option.",
+      "fee_summary": "£1,200 in full, or flexible monthly installment options starting from £300 deposit."
+    },
+    "secondary_recommendations": [
+      {
+        "title": "Business Law Course UK Online",
+        "level": "CPD Accredited",
+        "awarding_body": "Inspire London College",
+        "suitability": "Short CPD certificate covering key UK business contracts and corporate compliance."
+      }
+    ],
+    "spoken_pitch": "In law, our flagship qualification is the OTHM Level 7 Diploma in International Business Law. It is a fully regulated postgraduate program that qualifies you for direct progression onto an LLM Master of Laws top-up degree. Would you like to hear about the entry requirements or our flexible payment options for this diploma?"
+  },
+  "accounting_finance": {
+    "category_id": "accounting_finance",
+    "display_name": "Accounting & Finance",
+    "keywords": [
+      "accounting",
+      "finance",
+      "accountancy",
+      "bookkeeping",
+      "budgeting",
+      "financial management",
+      "accountant",
+      "acca",
+      "cfo",
+      "taxation"
+    ],
+    "primary_recommendation": {
+      "title": "OTHM Level 3 Foundation Diploma in Accountancy",
+      "level": "Level 3",
+      "awarding_body": "OTHM Qualifications",
+      "suitability": "Covers financial reporting, management accounting, and business math, establishing the ideal foundation for university or ACCA progression.",
+      "duration": "Standard 6-12 months, or 4-month Fast Track accelerated option.",
+      "fee_summary": "£679 in full, or flexible installments."
+    },
+    "secondary_recommendations": [
+      {
+        "title": "Level 4 Diploma in Bookkeeping and Budgeting",
+        "level": "Level 4",
+        "awarding_body": "Inspire London College",
+        "suitability": "Practical professional diploma for managing company accounts and payroll."
+      },
+      {
+        "title": "OTHM Level 5 Extended Diploma in Accounting and Business",
+        "level": "Level 5",
+        "awarding_body": "OTHM Qualifications",
+        "suitability": "240-credit undergraduate equivalent for accountancy careers."
+      },
+      {
+        "title": "OTHM Level 7 Diploma in Accounting and Finance",
+        "level": "Level 7",
+        "awarding_body": "OTHM Qualifications",
+        "suitability": "Postgraduate qualification providing exemptions and pathway into an MSc in Accounting and Finance."
+      }
+    ],
+    "spoken_pitch": "For finance, our most popular qualification is the OTHM Level 3 Foundation Diploma in Accountancy. We also offer Level 5 and Level 7 diplomas for advanced accounting and finance leadership. Which level matches your current accounting experience?"
+  },
+  "education_teaching": {
+    "category_id": "education_teaching",
+    "display_name": "Education, Teaching & Assessing",
+    "keywords": [
+      "teaching",
+      "education",
+      "trainer",
+      "teacher",
+      "aet",
+      "det",
+      "assessor",
+      "cava",
+      "iqa",
+      "teaching assistant",
+      "training",
+      "lecturer",
+      "tutor"
+    ],
+    "primary_recommendation": {
+      "title": "Qualifi Level 3 Award in Education and Training",
+      "level": "Level 3",
+      "awarding_body": "Qualifi",
+      "suitability": "The essential introductory qualification (formerly PTLLS) required in the UK to teach or train adult learners in colleges, workplaces, and private training.",
+      "duration": "Standard 3-6 months, or accelerated 4-month option.",
+      "fee_summary": "£280 in full, or flexible installments."
+    },
+    "secondary_recommendations": [
+      {
+        "title": "Qualifi Level 3 Certificate in Assessing Vocational Achievement",
+        "level": "Level 3",
+        "awarding_body": "Qualifi",
+        "suitability": "The official CAVA qualification to become a qualified NVQ and vocational assessor."
+      },
+      {
+        "title": "Qualifi Level 5 Diploma in Education and Training",
+        "level": "Level 5",
+        "awarding_body": "Qualifi",
+        "suitability": "The recognized full teaching diploma (formerly DTLLS) leading to Qualified Teacher Learning and Skills (QTLS) status."
+      },
+      {
+        "title": "Qualifi Level 4 Award in Internal Quality Assurance (IQA)",
+        "level": "Level 4",
+        "awarding_body": "Qualifi",
+        "suitability": "For experienced assessors moving into internal verification and quality auditing."
+      }
+    ],
+    "spoken_pitch": "For teaching, the essential UK qualification is the Level 3 Award in Education and Training, also known as the AET. If you want to become a certified NVQ assessor, we also have the CAVA qualification. Are you looking to teach and deliver training, or assess student coursework?"
+  },
+  "health_safety_construction": {
+    "category_id": "health_safety_construction",
+    "display_name": "Health & Safety and Construction",
+    "keywords": [
+      "health and safety",
+      "construction",
+      "cscs",
+      "green card",
+      "safety",
+      "site safety",
+      "risk assessment",
+      "manual handling",
+      "h&s",
+      "rospa",
+      "iirsm"
+    ],
+    "primary_recommendation": {
+      "title": "Level 1 Health and Safety in a Construction Environment (Leading to CSCS Green Card) + Exam",
+      "level": "Level 1",
+      "awarding_body": "ETA Awards",
+      "suitability": "The official Ofqual-regulated course and online exam required to apply for the 5-year CSCS Green Labourer Card in the UK.",
+      "duration": "100% online self-paced study with online proctored exam.",
+      "fee_summary": "Course and official exam package included."
+    },
+    "secondary_recommendations": [
+      {
+        "title": "Health & Safety Video Suite (54 Courses)",
+        "level": "CPD Accredited",
+        "awarding_body": "RoSPA / IIRSM / CPD",
+        "suitability": "Interactive video modules including Asbestos Awareness, Manual Handling, Working at Height, COSHH, and Fire Safety."
+      }
+    ],
+    "spoken_pitch": "For construction and site safety, we offer the official Level 1 Health and Safety in a Construction Environment, which includes the exam for the CSCS Green Card. We also provide 54 short CPD video certificates for workplace safety. Are you looking to get your CSCS card, or need general workplace health and safety certification?"
+  },
+  "childcare_early_years": {
+    "category_id": "childcare_early_years",
+    "display_name": "Childcare & Early Years Education",
+    "keywords": [
+      "childcare",
+      "early years",
+      "nursery",
+      "child",
+      "early years educator",
+      "nursery nurse",
+      "child psychology",
+      "preschool",
+      "early learning"
+    ],
+    "primary_recommendation": {
+      "title": "Qualifi Level 3 Diploma in Early Years Education and Care (Early Years Educator)",
+      "level": "Level 3",
+      "awarding_body": "Qualifi",
+      "suitability": "Confers full UK Early Years Educator (EYE) status required to work as a qualified practitioner or nursery room leader in UK nurseries and pre-schools.",
+      "duration": "Standard 6-12 months, or 4-month Fast Track accelerated option.",
+      "fee_summary": "£679 in full, or £75 deposit with flexible monthly payments."
+    },
+    "secondary_recommendations": [
+      {
+        "title": "iCQ Level 2 Diploma for the Early Years Practitioner",
+        "level": "Level 2",
+        "awarding_body": "iCQ Awards",
+        "suitability": "Entry-level qualification for nursery assistants and early years support staff."
+      },
+      {
+        "title": "Qualifi Level 5 Diploma in Early Learning and Childcare",
+        "level": "Level 5",
+        "awarding_body": "Qualifi",
+        "suitability": "Advanced leadership diploma for nursery managers and childcare business owners."
+      }
+    ],
+    "spoken_pitch": "For childcare, our most popular program is the Qualifi Level 3 Diploma in Early Years Education and Care, which gives you official Early Years Educator status. We also have Level 2 for entry-level nursery assistants. Are you already working in a nursery, or looking to start your career in early years?"
+  },
+  "project_logistics": {
+    "category_id": "project_logistics",
+    "display_name": "Project Management, Logistics & Supply Chain",
+    "keywords": [
+      "project management",
+      "logistics",
+      "supply chain",
+      "operations",
+      "project manager",
+      "procurement",
+      "risk management",
+      "project"
+    ],
+    "primary_recommendation": {
+      "title": "OTHM Level 7 Diploma in Project Management",
+      "level": "Level 7",
+      "awarding_body": "OTHM Qualifications",
+      "suitability": "Postgraduate 120-credit qualification covering agile and traditional project management, risk governance, and portfolio leadership.",
+      "duration": "Standard 6-12 months, or 4-month Fast Track accelerated option.",
+      "fee_summary": "£1,200 in full, or flexible installment options."
+    },
+    "secondary_recommendations": [
+      {
+        "title": "OTHM Level 7 Diploma in Logistics and Supply Chain Management",
+        "level": "Level 7",
+        "awarding_body": "OTHM Qualifications",
+        "suitability": "Postgraduate diploma for global supply chain, logistics, and procurement directors."
+      },
+      {
+        "title": "OTHM Level 7 Diploma in Risk Management",
+        "level": "Level 7",
+        "awarding_body": "OTHM Qualifications",
+        "suitability": "Specialized enterprise risk management and corporate resilience diploma."
+      }
+    ],
+    "spoken_pitch": "In project management and logistics, our top qualification is the OTHM Level 7 Postgraduate Diploma in Project Management. We also have dedicated Level 7 programs in Logistics and Supply Chain Management. Are you focusing on general project leadership, or logistics and supply chain?"
+  }
+}

@@ -1,0 +1,75 @@
+import { NextResponse, NextRequest } from "next/server";
+import { prisma } from "@/lib/prisma";
+
+export async function GET(req: NextRequest) {
+  try {
+    const callbacks = await prisma.scheduledCallback.findMany({
+      orderBy: { scheduledTime: "asc" },
+      take: 50,
+    });
+    return NextResponse.json({ callbacks });
+  } catch (error) {
+    console.error("Failed to fetch callbacks:", error);
+    return NextResponse.json(
+      { error: "Failed to fetch callbacks" },
+      { status: 500 }
+    );
+  }
+}
+
+function parseFlexibleDate(val?: string | null): Date | null {
+  if (!val) return null;
+  const direct = new Date(val);
+  if (!isNaN(direct.getTime())) return direct;
+
+  const lower = val.toLowerCase();
+  const target = new Date();
+
+  if (lower.includes("tomorrow")) {
+    target.setDate(target.getDate() + 1);
+  } else if (lower.includes("day after tomorrow")) {
+    target.setDate(target.getDate() + 2);
+  }
+
+  const timeMatch = lower.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (timeMatch) {
+    let hour = parseInt(timeMatch[1], 10);
+    const minute = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+    const meridian = timeMatch[3];
+    if (meridian === "pm" && hour < 12) hour += 12;
+    if (meridian === "am" && hour === 12) hour = 0;
+    target.setHours(hour, minute, 0, 0);
+  } else {
+    target.setHours(17, 0, 0, 0);
+  }
+
+  return isNaN(target.getTime()) ? new Date(Date.now() + 86400000) : target;
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const { customerName, phoneNumber, course, scheduledTime, agentAssigned, notes } = body;
+
+    const parsedDate = parseFlexibleDate(scheduledTime) || new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    const callback = await prisma.scheduledCallback.create({
+      data: {
+        customerName: customerName || "Prospective Student",
+        phoneNumber: phoneNumber || "+44 7000 000000",
+        course: course || "General Qualification",
+        scheduledTime: parsedDate,
+        agentAssigned: agentAssigned || "Sarah Jenkins (Ext 101)",
+        notes: notes || "Callback requested during automated outbound dialing session.",
+      },
+    });
+
+    return NextResponse.json({ success: true, callback }, { status: 201 });
+  } catch (error) {
+    console.error("Failed to schedule callback:", error);
+    return NextResponse.json(
+      { error: "Failed to schedule callback" },
+      { status: 500 }
+    );
+  }
+}

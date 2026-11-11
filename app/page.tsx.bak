@@ -1,0 +1,949 @@
+"use client";
+
+import React, { useState, useEffect, useCallback } from "react";
+import Link from "next/link";
+import { Room, RoomEvent, createLocalAudioTrack } from "livekit-client";
+import { useLiveCalls, CallMetrics } from "./hooks/useLiveCalls";
+import { useTranscriptStream } from "./hooks/useTranscriptStream";
+import AgentsView from "./components/AgentsView";
+import CallsView from "./components/CallsView";
+import CustomersView from "./components/CustomersView";
+import ReportsView from "./components/ReportsView";
+import SettingsView from "./components/SettingsView";
+import TeamPresenceView from "./components/TeamPresenceView";
+import OutboundLeadsView from "./components/OutboundLeadsView";
+import OutboundCallsView from "./components/OutboundCallsView";
+import LeadsManagerView from "./components/LeadsManagerView";
+import {
+  Bot,
+  Phone,
+  PhoneIncoming,
+  PhoneOutgoing,
+  PhoneOff,
+  Clock,
+  Timer,
+  ArrowUpRight,
+  Users,
+  UserCheck,
+  FileSpreadsheet,
+  BarChart2,
+  Settings,
+  LayoutDashboard,
+  Search,
+  Calendar,
+  ChevronDown,
+  Bell,
+  Activity,
+  Mic,
+  MicOff,
+  LucideIcon,
+  Radio,
+  CheckCircle2,
+  Download,
+  Volume2,
+  Headphones,
+  Flame,
+} from "lucide-react";
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+} from "recharts";
+
+interface MetricCardProps {
+  title: string;
+  value: string;
+  change: string;
+  icon: LucideIcon;
+  color: string;
+}
+
+interface CallRecord {
+  id: string;
+  phoneNumber: string;
+  customerName: string | null;
+  status: string;
+  waitTimeSec: number;
+  durationSec: number;
+  recordingUrl?: string | null;
+  notes?: string | null;
+  createdAt: string;
+}
+
+const trendData = [
+  { time: "8 AM", total: 85, answered: 65, missed: 20 },
+  { time: "10 AM", total: 105, answered: 82, missed: 23 },
+  { time: "12 PM", total: 130, answered: 102, missed: 28 },
+  { time: "2 PM", total: 168, answered: 142, missed: 26 },
+  { time: "4 PM", total: 125, answered: 98, missed: 27 },
+  { time: "6 PM", total: 88, answered: 68, missed: 20 },
+  { time: "8 PM", total: 95, answered: 76, missed: 19 },
+  { time: "10 PM", total: 80, answered: 62, missed: 18 },
+];
+
+function formatDuration(sec: number): string {
+  if (!sec || isNaN(sec)) return "00:00";
+  const mins = Math.floor(sec / 60);
+  const remainingSecs = Math.floor(sec % 60);
+  return `${mins.toString().padStart(2, "0")}:${remainingSecs.toString().padStart(2, "0")}`;
+}
+
+export default function Dashboard() {
+  const [activeTab, setActiveTab] = useState("dashboard");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [notificationsCount, setNotificationsCount] = useState(3);
+  const [initialMetrics, setInitialMetrics] = useState<CallMetrics>({
+    totalCalls: 0,
+    answeredCalls: 0,
+    missedCalls: 0,
+    avgWaitTime: "00:00",
+    avgDuration: "00:00",
+  });
+  const [callHistory, setCallHistory] = useState<CallRecord[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
+  // Fetch initial API metrics on mount
+  useEffect(() => {
+    async function fetchStats() {
+      try {
+        const res = await fetch("/api/calls");
+        const data = await res.json();
+        setInitialMetrics(data);
+      } catch (err) {
+        console.error("Failed to load initial metrics", err);
+      }
+    }
+    fetchStats();
+  }, []);
+
+  // Subscribe to live SSE metrics
+  const { metrics, isConnected } = useLiveCalls(initialMetrics);
+  const { entries: transcriptEntries, isConnected: transcriptConnected } = useTranscriptStream();
+  const [voiceStatus, setVoiceStatus] = useState<"disconnected" | "connecting" | "connected">("disconnected");
+  const [voiceError, setVoiceError] = useState<string>("");
+  const [voiceRoom, setVoiceRoom] = useState<Room | null>(null);
+
+  // Live call duration timer
+  const [callDuration, setCallDuration] = useState("00:00");
+  const isSipCallActive = Boolean(metrics.activeCall?.isCallActive);
+
+  useEffect(() => {
+    if (!isSipCallActive || !metrics.activeCall?.startTime) {
+      setCallDuration("00:00");
+      return;
+    }
+    const updateTimer = () => {
+      const elapsed = Math.max(
+        0,
+        Math.floor((Date.now() - (metrics.activeCall?.startTime || Date.now())) / 1000)
+      );
+      const mins = Math.floor(elapsed / 60)
+        .toString()
+        .padStart(2, "0");
+      const secs = (elapsed % 60).toString().padStart(2, "0");
+      setCallDuration(`${mins}:${secs}`);
+    };
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+    return () => clearInterval(interval);
+  }, [isSipCallActive, metrics.activeCall?.startTime]);
+
+  // Load call history when switching to 'calls' tab or when a call ends
+  useEffect(() => {
+    if (activeTab === "calls" || !isSipCallActive) {
+      setLoadingHistory(true);
+      fetch("/api/calls?history=true")
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.calls) setCallHistory(data.calls);
+        })
+        .catch((err) => console.error("Failed to load call history:", err))
+        .finally(() => setLoadingHistory(false));
+    }
+  }, [activeTab, isSipCallActive]);
+
+  const disconnectVoiceAgent = useCallback(() => {
+    if (voiceRoom) {
+      voiceRoom.disconnect();
+    }
+    setVoiceRoom(null);
+    setVoiceStatus("disconnected");
+    setVoiceError("");
+  }, [voiceRoom]);
+
+  useEffect(() => {
+    return () => {
+      disconnectVoiceAgent();
+    };
+  }, [disconnectVoiceAgent]);
+
+  const connectVoiceAgent = async () => {
+    setVoiceError("");
+    setVoiceStatus("connecting");
+
+    try {
+      const response = await fetch("/api/livekit/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          room: "callcenter-dashboard-room",
+          identity: `dashboard-user-${Date.now()}`,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Unable to get a LiveKit access token.");
+      }
+
+      const room = new Room({
+        adaptiveStream: true,
+        dynacast: true,
+      });
+
+      room.on(RoomEvent.Disconnected, () => {
+        setVoiceStatus("disconnected");
+        setVoiceError("");
+      });
+
+      await room.connect(data.url, data.token);
+
+      const audioTrack = await createLocalAudioTrack({
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      });
+
+      await room.localParticipant.publishTrack(audioTrack);
+
+      setVoiceRoom(room);
+      setVoiceStatus("connected");
+      setVoiceError("");
+    } catch (error) {
+      console.error("Failed to connect voice agent", error);
+      setVoiceStatus("disconnected");
+      setVoiceError(
+        error instanceof Error ? error.message : "Could not connect to the voice agent."
+      );
+    }
+  };
+
+  const outcomeData = [
+    { name: "Answered", value: metrics.answeredCalls, color: "#6366f1" },
+    { name: "Missed", value: metrics.missedCalls, color: "#f43f5e" },
+    { name: "Voicemail", value: 26, color: "#a855f7" },
+    { name: "Callback", value: 19, color: "#38bdf8" },
+  ];
+
+  const summaryTranscript = transcriptEntries.slice(-8).reverse();
+  const conversationStatus = isSipCallActive
+    ? `🟢 Live SIP Call Active: ${metrics.activeCall?.caller} (${metrics.activeCall?.phoneNumber}) • Duration ${callDuration}`
+    : voiceStatus === "connected"
+    ? "Agent connected via browser microphone"
+    : voiceStatus === "connecting"
+    ? "Connecting to LiveKit agent"
+    : "LiveKit Agent ready — waiting for caller (MicroSIP / Web)";
+
+  return (
+    <div className="flex bg-slate-50 min-h-screen font-sans">
+      {/* Sidebar */}
+      <aside className="w-64 bg-white border-r border-slate-200 h-screen sticky top-0 flex flex-col justify-between p-4">
+        <div>
+          <div className="flex items-center gap-3 px-2 mb-8">
+            <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-bold text-lg shadow-sm">
+              <Phone className="w-5 h-5" />
+            </div>
+            <div>
+              <h1 className="font-bold text-slate-800 text-base leading-tight">CallCenter Pro</h1>
+              <p className="text-[10px] text-slate-400 font-medium">Smarter Support, Happier Customers</p>
+            </div>
+          </div>
+          <nav className="space-y-1.5">
+            {[
+              { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+              { id: "all_leads", label: "Leads (All Synced)", icon: Users },
+              { id: "calls", label: "Inbound Calls", icon: PhoneIncoming },
+              { id: "outbound_calls", label: "Outbound Calls", icon: PhoneOutgoing },
+              { id: "outbound", label: "Outbound Leads", icon: FileSpreadsheet },
+              { id: "team", label: "Support Team", icon: UserCheck },
+              { id: "agents", label: "AI Agent (Sonia)", icon: Bot },
+              { id: "customers", label: "Customers CRM", icon: Users },
+              { id: "reports", label: "Reports", icon: BarChart2 },
+              { id: "settings", label: "Settings", icon: Settings },
+            ].map((item) => {
+              const Icon = item.icon;
+              const isActive = activeTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => setActiveTab(item.id)}
+                  className={`w-full flex items-center gap-3.5 px-4 py-3 rounded-xl font-medium text-sm transition-all duration-150 ${
+                    isActive
+                      ? "bg-indigo-600 text-white shadow-md shadow-indigo-500/20"
+                      : "text-slate-600 hover:bg-slate-100 active:scale-95"
+                  }`}
+                >
+                  <Icon className="w-4 h-4" /> {item.label}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+        <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 flex items-center gap-3">
+          <span className="relative flex h-3 w-3">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+          </span>
+          <div>
+            <p className="text-xs font-semibold text-slate-700">System Online</p>
+            <p className="text-[10px] text-slate-400">All services operational</p>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <div className="flex-1 flex flex-col">
+        {/* Header */}
+        <header className="h-16 bg-white border-b border-slate-200 px-6 flex items-center justify-between sticky top-0 z-10">
+          <div className="relative w-96">
+            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search phone numbers, caller name, or notes..."
+              className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+            />
+          </div>
+          <div className="flex items-center gap-4">
+            <button className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100">
+              <Calendar className="w-3.5 h-3.5 text-slate-400" />
+              <span>Today: Live Session</span>
+              <ChevronDown className="w-3 h-3 text-slate-400" />
+            </button>
+            <button
+              onClick={() => setNotificationsCount(0)}
+              className="relative p-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-600 hover:bg-slate-100 active:scale-95"
+            >
+              <Bell className="w-4 h-4" />
+              {notificationsCount > 0 && (
+                <span className="absolute -top-1 -right-1 bg-indigo-600 text-white text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center">
+                  {notificationsCount}
+                </span>
+              )}
+            </button>
+            <div className="flex items-center gap-2.5 pl-2 border-l border-slate-200">
+              <div className="w-8 h-8 rounded-full bg-indigo-700 text-white font-semibold text-xs flex items-center justify-center">
+                IL
+              </div>
+              <div className="text-left">
+                <p className="text-xs font-bold text-slate-800 leading-tight">ILC / UKPDA</p>
+                <p className="text-[10px] text-slate-400">Voice Admissions</p>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        {/* Dashboard Workspace */}
+        <main className="p-6 space-y-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-xl font-bold text-slate-900 capitalize">
+                {activeTab === "outbound_calls"
+                  ? "Outbound Calls History & Written AI Summaries"
+                  : activeTab === "outbound"
+                  ? "Outbound Campaigns, Lead Sheet Upload & AI Qualification"
+                  : activeTab === "team"
+                  ? "Customer Support Team Presence & Call Transfer Roster"
+                  : activeTab === "calls"
+                  ? "Inbound Calls History & Audio Recordings"
+                  : activeTab === "agents"
+                  ? "Agent Operations & Telephony Cockpit"
+                  : activeTab === "customers"
+                  ? "Student Admissions CRM & Prospective Leads"
+                  : activeTab === "reports"
+                  ? "Institutional Analytics & Conversion Reports"
+                  : activeTab === "settings"
+                  ? "System Settings & Telephony Integration"
+                  : "Live Telephony Dashboard Overview"}
+              </h1>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {activeTab === "outbound_calls"
+                  ? "Dedicated outbound call logs with recordings, lead scores, disposition tracking, and detailed AI written summaries."
+                  : activeTab === "outbound"
+                  ? "Upload lead spreadsheets, auto-dial prospects with Sonia, prioritize hot leads, and schedule callbacks."
+                  : activeTab === "team"
+                  ? "Monitor real-time advisor status (Free, Busy, Break), ongoing calls, and transfer calls from AI with 1-click."
+                  : activeTab === "calls"
+                  ? "Review all incoming student inquiries, audio playback, and call duration records."
+                  : activeTab === "agents"
+                  ? "Monitor AI voice latency, autonomous capabilities, and human escalation staff."
+                  : activeTab === "customers"
+                  ? "Track and manage prospective student inquiries, follow-ups, and enrollment status."
+                  : activeTab === "reports"
+                  ? "Comprehensive admission funnels, course interest distribution, and call statistics."
+                  : activeTab === "settings"
+                  ? "Configure live WordPress REST endpoints, LiveKit Cloud credentials, and TTS voices."
+                  : "Real-time telephony monitoring & AI Voice Agent performance."}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 rounded-xl shadow-sm">
+              <Activity className={`w-4 h-4 ${isConnected ? "text-emerald-500 animate-pulse" : "text-amber-500"}`} />
+              <span className="text-xs font-semibold text-slate-700">
+                {isConnected ? "Live Telephony Stream Active" : "Connecting to stream..."}
+              </span>
+            </div>
+          </div>
+
+          {/* Active Live Call Banner */}
+          {isSipCallActive && (
+            <div className="bg-gradient-to-r from-emerald-600 to-teal-700 rounded-2xl p-5 text-white shadow-lg flex items-center justify-between animate-pulse border-2 border-emerald-400">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-xl bg-white/20 flex items-center justify-center shadow-inner">
+                  <PhoneIncoming className="w-6 h-6 text-white" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="bg-emerald-300 text-emerald-950 text-[10px] font-extrabold px-2.5 py-0.5 rounded-full uppercase tracking-wider">
+                      LIVE CALL IN PROGRESS
+                    </span>
+                    <span className="text-emerald-100 text-xs font-mono">
+                      Caller ID: {metrics.activeCall?.phoneNumber}
+                    </span>
+                  </div>
+                  <h3 className="text-lg font-bold mt-1">
+                    {metrics.activeCall?.caller}
+                  </h3>
+                  <p className="text-xs text-emerald-100">
+                    Sonia (AI Voice Agent) is actively speaking with the customer.
+                  </p>
+                </div>
+              </div>
+              <div className="text-right bg-white/10 px-5 py-3 rounded-xl border border-white/20">
+                <p className="text-[11px] text-emerald-200 font-medium">Call Duration</p>
+                <p className="text-3xl font-mono font-extrabold text-white">{callDuration}</p>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "dashboard" ? (
+            <>
+              {/* Customer Support Friendly AI Advisor Banner */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs">
+                <div className="flex items-center justify-between gap-4 flex-wrap">
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-indigo-600 to-violet-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/20">
+                      <Bot className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-base font-bold text-slate-900">
+                          Sonia • AI Student Admissions Representative
+                        </h2>
+                        <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                          Ready for Calls
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Inspire London College & UKPDA • Automatically answers course inquiries, fees, and order status.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <div className="text-right hidden sm:block">
+                      <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Helpline Softphone</p>
+                      <p className="text-xs font-mono font-bold text-indigo-700">Dial 100 on MicroSIP</p>
+                    </div>
+
+                    {voiceStatus === "connected" ? (
+                      <button
+                        onClick={disconnectVoiceAgent}
+                        className="px-4 py-2 bg-slate-800 text-white rounded-xl text-xs font-semibold hover:bg-slate-900 transition"
+                      >
+                        Disconnect Web Mic
+                      </button>
+                    ) : (
+                      <button
+                        onClick={connectVoiceAgent}
+                        disabled={voiceStatus === "connecting"}
+                        className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-semibold hover:bg-indigo-700 transition shadow-xs flex items-center gap-1.5 disabled:opacity-60"
+                      >
+                        <Mic className="w-3.5 h-3.5" />
+                        {voiceStatus === "connecting" ? "Connecting..." : "Test Talk in Browser"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {voiceError && (
+                  <p className="mt-3 text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">
+                    {voiceError}
+                  </p>
+                )}
+              </div>
+
+              {/* Transcripts and Admissions Support Quick Assist Grid */}
+              <div className="grid grid-cols-1 lg:grid-cols-[1.5fr_1fr] gap-6">
+                {/* Live Conversation Transcript Box */}
+                <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between mb-4">
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-indigo-600 tracking-wider bg-indigo-50 px-2 py-0.5 rounded-md">
+                          Live Call Assistant
+                        </span>
+                        <h3 className="mt-1 text-base font-bold text-slate-800">Real-Time Call Transcript</h3>
+                      </div>
+                      <span
+                        className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ${
+                          transcriptConnected ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-600"
+                        }`}
+                      >
+                        <span className={`h-1.5 w-1.5 rounded-full ${transcriptConnected ? "bg-emerald-500 animate-pulse" : "bg-slate-400"}`} />
+                        {transcriptConnected ? "Listening to Caller" : "Waiting for Call"}
+                      </span>
+                    </div>
+
+                    <div className="space-y-3">
+                      <div className="rounded-xl border border-indigo-100 bg-indigo-50/70 px-3.5 py-2.5 text-xs font-medium text-indigo-900 flex items-center justify-between">
+                        <span>{conversationStatus}</span>
+                        {isSipCallActive && (
+                          <span className="font-mono bg-white px-2.5 py-0.5 rounded-lg text-emerald-700 font-bold shadow-xs">
+                            ⏱ {callDuration}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="max-h-80 overflow-y-auto space-y-2.5 pr-1">
+                        {summaryTranscript.length === 0 ? (
+                          <div className="text-center py-10 px-4 bg-slate-50/60 rounded-xl border border-dashed border-slate-200 text-slate-400 text-xs">
+                            <Bot className="w-8 h-8 mx-auto text-slate-300 mb-2" />
+                            <p className="font-medium text-slate-600">No active phone call right now</p>
+                            <p className="text-[11px] text-slate-400 mt-0.5">
+                              When a student calls (or when you dial <span className="font-bold text-indigo-600">100</span> in MicroSIP), their live speech will appear here automatically.
+                            </p>
+                          </div>
+                        ) : (
+                          summaryTranscript.map((entry) => (
+                            <div
+                              key={entry.id}
+                              className={`rounded-2xl border p-3.5 text-xs shadow-xs transition-all ${
+                                entry.role === "agent"
+                                  ? "bg-indigo-600 text-white border-indigo-500 ml-4"
+                                  : entry.role === "user"
+                                  ? "bg-slate-50 text-slate-800 border-slate-200 mr-4"
+                                  : "bg-slate-100 text-slate-600 border-slate-200"
+                              }`}
+                            >
+                              <div className="mb-1.5 flex items-center justify-between gap-2">
+                                <span className="font-bold text-[11px]">
+                                  {entry.role === "agent"
+                                    ? "🎓 Sonia (AI Admissions Advisor)"
+                                    : entry.role === "user"
+                                    ? "👤 Student Caller"
+                                    : "⚙️ System Notice"}
+                                </span>
+                                <span className="opacity-75 text-[10px] font-mono">
+                                  {new Date(entry.timestamp).toLocaleTimeString([], {
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                    second: "2-digit",
+                                  })}
+                                </span>
+                              </div>
+                              <p className="leading-relaxed text-xs">{entry.text}</p>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Admissions Support Quick Assist & Knowledge Desk */}
+                <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs flex flex-col justify-between space-y-4">
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] uppercase font-bold text-indigo-600 tracking-wider bg-indigo-50 px-2 py-0.5 rounded-md">
+                        Staff Cheat Sheet
+                      </span>
+                      <span className="text-[10px] text-emerald-700 font-semibold flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> Website Synced
+                      </span>
+                    </div>
+                    <h3 className="mt-1 text-base font-bold text-slate-800">
+                      Admissions Team Quick Assist
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Fast course pricing & verified facts while assisting callers.
+                    </p>
+
+                    <div className="mt-4 space-y-2.5 text-xs">
+                      <div className="p-3 rounded-xl bg-slate-50 border border-slate-100 space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-slate-800">💉 Phlebotomy Part 1 (Theory)</span>
+                          <span className="font-bold text-emerald-600 font-mono">£80.00</span>
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          Regular: £199 • London classroom dates: 22 Aug, 5 Sept, 19 Sept, 10 Oct.
+                        </p>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-slate-50 border border-slate-100 space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-slate-800">🩸 Phlebotomy Part 2 (Live Blood)</span>
+                          <span className="font-bold text-emerald-600 font-mono">£270.00</span>
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          NHS standards & practical live blood training with certified clinical mentors.
+                        </p>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-slate-50 border border-slate-100 space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-slate-800">🎓 University Progression</span>
+                          <span className="text-[10px] font-semibold text-indigo-600">Fast-Track</span>
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          ATHE & Qualifi level 4-7 diplomas progress directly into UK University Degrees.
+                        </p>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-slate-50 border border-slate-100 space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-slate-800">🔍 Student Order Verification</span>
+                          <span className="text-[10px] font-semibold text-slate-400">Order ID Check</span>
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          Ask student for their 6-digit Order ID (e.g. #117070) for instant live lookup.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Recent Call Audio Player */}
+                  <div className="pt-3 border-t border-slate-100">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                        <Headphones className="w-3.5 h-3.5 text-indigo-600" />
+                        Last Call Recording
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-mono">
+                        {formatDuration(callHistory.find((c) => c.recordingUrl)?.durationSec || 42)}
+                      </span>
+                    </div>
+                    {callHistory.find((c) => c.recordingUrl) ? (
+                      <audio
+                        controls
+                        preload="metadata"
+                        src={callHistory.find((c) => c.recordingUrl)?.recordingUrl || ""}
+                        className="h-8 w-full rounded-lg"
+                      />
+                    ) : (
+                      <div className="p-2 bg-slate-50 rounded-xl border border-slate-100 text-center text-[11px] text-slate-400">
+                        Audio recording available after next completed call.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Real Metric Cards */}
+              <div className="grid grid-cols-5 gap-4">
+                <MetricCard
+                  title="Total Calls"
+                  value={metrics.totalCalls.toLocaleString()}
+                  change="+ 100%"
+                  icon={Phone}
+                  color="bg-purple-50 text-purple-600"
+                />
+                <MetricCard
+                  title="Answered Calls"
+                  value={metrics.answeredCalls.toLocaleString()}
+                  change="+ 100%"
+                  icon={PhoneIncoming}
+                  color="bg-emerald-50 text-emerald-600"
+                />
+                <MetricCard
+                  title="Missed Calls"
+                  value={metrics.missedCalls.toLocaleString()}
+                  change="0%"
+                  icon={PhoneOff}
+                  color="bg-rose-50 text-rose-600"
+                />
+                <MetricCard
+                  title="Avg. Wait Time"
+                  value={metrics.avgWaitTime}
+                  change="< 2s"
+                  icon={Clock}
+                  color="bg-indigo-50 text-indigo-600"
+                />
+                <MetricCard
+                  title="Call Duration (Avg)"
+                  value={metrics.avgDuration}
+                  change="Live"
+                  icon={Timer}
+                  color="bg-slate-100 text-slate-700"
+                />
+              </div>
+
+              {/* Charts Row */}
+              <div className="grid grid-cols-3 gap-6">
+                <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm col-span-2">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="font-bold text-slate-800 text-sm">Call Volume Trend</h3>
+                    <div className="flex items-center gap-4 text-xs font-medium text-slate-500">
+                      <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-indigo-500"></span> Total Calls</span>
+                      <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-slate-800"></span> Answered</span>
+                      <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-rose-500"></span> Missed</span>
+                    </div>
+                  </div>
+                  <div className="h-56">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={trendData}>
+                        <XAxis dataKey="time" stroke="#cbd5e1" fontSize={11} tickLine={false} />
+                        <YAxis stroke="#cbd5e1" fontSize={11} tickLine={false} axisLine={false} />
+                        <Tooltip contentStyle={{ backgroundColor: "#ffffff", borderRadius: "12px", border: "1px solid #f1f5f9" }} />
+                        <Area type="monotone" dataKey="total" stroke="#6366f1" fillOpacity={0.1} fill="#6366f1" strokeWidth={2} />
+                        <Area type="monotone" dataKey="answered" stroke="#1e293b" fillOpacity={0} strokeWidth={2} />
+                        <Area type="monotone" dataKey="missed" stroke="#f43f5e" fillOpacity={0} strokeWidth={2} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm flex flex-col justify-between">
+                  <h3 className="font-bold text-slate-800 text-sm">Call Outcome</h3>
+                  <div className="h-44 relative my-2">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie data={outcomeData} innerRadius={55} outerRadius={75} paddingAngle={4} dataKey="value">
+                          {outcomeData.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.color} />
+                          ))}
+                        </Pie>
+                      </PieChart>
+                    </ResponsiveContainer>
+                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                      <span className="text-xl font-extrabold text-slate-800">{metrics.totalCalls.toLocaleString()}</span>
+                      <span className="text-[10px] text-slate-400 font-medium">Total Calls</span>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5 text-xs">
+                    {outcomeData.map((item) => (
+                      <div key={item.name} className="flex items-center justify-between">
+                        <span className="flex items-center gap-2 text-slate-600">
+                          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: item.color }}></span>
+                          {item.name}
+                        </span>
+                        <span className="font-semibold text-slate-800">{item.value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Hybrid AI + Human Workforce Live Snapshot */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* 1. Support Team Presence Snapshot */}
+                <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center font-bold">
+                          <UserCheck className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-800">Support Team Live Presence</h3>
+                          <p className="text-[11px] text-slate-400">Available staff ready for AI call transfer</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setActiveTab("team")}
+                        className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
+                      >
+                        Manage Team →
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2.5 mb-4 text-center">
+                      <div className="p-2.5 rounded-xl bg-emerald-50/70 border border-emerald-100">
+                        <p className="text-[10px] uppercase font-bold text-emerald-800">Available</p>
+                        <p className="text-lg font-extrabold text-emerald-950 mt-0.5">3 Staff</p>
+                      </div>
+                      <div className="p-2.5 rounded-xl bg-rose-50/70 border border-rose-100">
+                        <p className="text-[10px] uppercase font-bold text-rose-800">On Call</p>
+                        <p className="text-lg font-extrabold text-rose-950 mt-0.5">2 Staff</p>
+                      </div>
+                      <div className="p-2.5 rounded-xl bg-amber-50/70 border border-amber-100">
+                        <p className="text-[10px] uppercase font-bold text-amber-800">On Break</p>
+                        <p className="text-lg font-extrabold text-amber-950 mt-0.5">1 Staff</p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-100 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                          <span className="font-bold text-slate-800">Sarah Jenkins</span>
+                          <span className="text-[10px] font-mono bg-white px-1.5 py-0.5 rounded border text-slate-600">Ext 101</span>
+                        </div>
+                        <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                          Admissions Lead • Free
+                        </span>
+                      </div>
+                      <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-100 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping"></span>
+                          <span className="font-bold text-slate-800">Marcus Vance</span>
+                          <span className="text-[10px] font-mono bg-white px-1.5 py-0.5 rounded border text-slate-600">Ext 102</span>
+                        </div>
+                        <span className="text-[10px] font-semibold text-rose-700 bg-rose-100 px-2 py-0.5 rounded-full">
+                          Cyber Advisory • On Call (03:12)
+                        </span>
+                      </div>
+                      <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-100 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                          <span className="font-bold text-slate-800">Ayesha Malik</span>
+                          <span className="text-[10px] font-mono bg-white px-1.5 py-0.5 rounded border text-slate-600">Ext 103</span>
+                        </div>
+                        <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                          Billing & Fees • Free
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2. Outbound Leads & AI Qualification Snapshot */}
+                <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-9 h-9 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center font-bold">
+                          <Flame className="w-5 h-5 text-rose-600" />
+                        </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-800">Outbound Campaigns & Priority Leads</h3>
+                          <p className="text-[11px] text-slate-400">AI auto-qualified prospects & callbacks</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setActiveTab("outbound")}
+                        className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
+                      >
+                        Open Campaigns →
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2.5 mb-4 text-center">
+                      <div className="p-2.5 rounded-xl bg-rose-50/70 border border-rose-100">
+                        <p className="text-[10px] uppercase font-bold text-rose-800">Hot Qualified</p>
+                        <p className="text-lg font-extrabold text-rose-950 mt-0.5">2 Leads</p>
+                      </div>
+                      <div className="p-2.5 rounded-xl bg-amber-50/70 border border-amber-100">
+                        <p className="text-[10px] uppercase font-bold text-amber-800">Warm</p>
+                        <p className="text-lg font-extrabold text-amber-950 mt-0.5">2 Leads</p>
+                      </div>
+                      <div className="p-2.5 rounded-xl bg-indigo-50/70 border border-indigo-100">
+                        <p className="text-[10px] uppercase font-bold text-indigo-800">Callbacks Booked</p>
+                        <p className="text-lg font-extrabold text-indigo-950 mt-0.5">2 Calls</p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="p-2.5 bg-rose-50/40 rounded-xl border border-rose-200/60 flex items-center justify-between text-xs">
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-slate-800">Tariq Mahmood</span>
+                            <span className="px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-rose-100 text-rose-700">95% HOT</span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 mt-0.5">Qualifi Level 5 Cyber Security • Transferred to Ext 101</p>
+                        </div>
+                        <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                          Transferred
+                        </span>
+                      </div>
+                      <div className="p-2.5 bg-indigo-50/40 rounded-xl border border-indigo-200/60 flex items-center justify-between text-xs">
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-slate-800">Bilal Rehman</span>
+                            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-800">74% WARM</span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 mt-0.5">OTHM Level 7 Strategic Marketing • Callback tomorrow 3 PM</p>
+                        </div>
+                        <span className="text-[10px] font-bold text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded-full">
+                          Callback
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : activeTab === "all_leads" ? (
+            <LeadsManagerView />
+          ) : activeTab === "calls" ? (
+            <CallsView
+              calls={callHistory}
+              onRefresh={() => {
+                fetch("/api/calls?history=true")
+                  .then((res) => res.json())
+                  .then((data) => {
+                    if (data.calls) setCallHistory(data.calls);
+                  });
+              }}
+            />
+          ) : activeTab === "outbound_calls" ? (
+            <OutboundCallsView />
+          ) : activeTab === "outbound" ? (
+            <OutboundLeadsView />
+          ) : activeTab === "team" ? (
+            <TeamPresenceView />
+          ) : activeTab === "agents" ? (
+            <AgentsView />
+          ) : activeTab === "customers" ? (
+            <CustomersView />
+          ) : activeTab === "reports" ? (
+            <ReportsView />
+          ) : activeTab === "settings" ? (
+            <SettingsView />
+          ) : null}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({ title, value, change, icon: Icon, color }: MetricCardProps) {
+  return (
+    <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm flex flex-col justify-between hover:shadow-md transition-shadow cursor-pointer">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-slate-500">{title}</span>
+        <div className={`p-2 rounded-xl ${color}`}>
+          <Icon className="w-4 h-4" />
+        </div>
+      </div>
+      <div className="mt-3">
+        <h2 className="text-2xl font-bold text-slate-800">{value}</h2>
+        <div className="flex items-center gap-1 mt-1 text-[11px]">
+          <span className="font-semibold flex items-center text-emerald-600">
+            <ArrowUpRight className="w-3 h-3 inline" />
+            {change}
+          </span>
+          <span className="text-slate-400">vs. previous 24h</span>
+        </div>
+      </div>
+    </div>
+  );
+}

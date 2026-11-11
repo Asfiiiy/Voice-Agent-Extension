@@ -1,0 +1,8 @@
+@echo off
+title Sonia Voice Agent Worker (Dev Mode)
+cd /d "%~dp0"
+set PYTHONUNBUFFERED=1
+set PYTHONIOENCODING=utf-8
+echo Starting Sonia Voice Agent Worker...
+"C:\Users\New Computer Arena\Documents\voice agent 2\.venv\Scripts\python.exe" -u agent.py dev --log-level=INFO
+pause
